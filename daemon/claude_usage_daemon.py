@@ -217,6 +217,12 @@ async def fetch_oauth_usage(token: str) -> dict | None:
         log("oauth/usage returned non-JSON")
         return None
 
+    # Diagnostic: log top-level keys once per cache window so we know what
+    # the endpoint actually returns. The shape is undocumented and has
+    # shifted between betas.
+    if not _oauth_usage_cache:
+        log(f"oauth/usage top-level keys: {sorted(body.keys()) if isinstance(body, dict) else type(body).__name__}")
+
     _oauth_usage_cache = (now, body)
     return body
 
@@ -228,7 +234,11 @@ def _extract_extra_usage(body: dict) -> tuple[float, float] | None:
     and Anthropic has shipped at least two naming variants.
     """
     eu = body.get("extra_usage")
+    if eu is None:
+        log("oauth/usage: no extra_usage field in response")
+        return None
     if not isinstance(eu, dict):
+        log(f"oauth/usage: extra_usage is {type(eu).__name__}, not object: {eu!r}")
         return None
     spend = None
     for k in ("spend", "amount", "used", "spent", "current_usage", "cost"):
