@@ -23,3 +23,7 @@ void ble_request_refresh(void);
 // BLE HID keyboard
 void ble_keyboard_press(uint8_t key, uint8_t modifier);
 void ble_keyboard_release(void);
+// Type a literal ASCII string. Supports: a-z, 0-9, '/', ' ', '\n'.
+// Each character is sent as press+release with a small delay so the host
+// registers distinct keystrokes. Unsupported characters are skipped.
+void ble_type_string(const char* s);

@@ -464,34 +464,65 @@ void loop() {
     }
     lv_timer_handler();
     ui_tick_anim();
+    ui_pomodoro_tick();
     ble_tick();
     power_tick();
     imu_tick();
     splash_tick();
 
     // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    //   LEFT  (BOOT)    → Space (voice-mode push-to-talk; press & release tracked)
+    //   RIGHT (KEY2)    → short: Shift+Tab; long-hold: start 25-min Pomodoro
+    //   PWR   (AXP)     → cycle screens; on splash, cycle animations;
+    //                     on pomodoro, cancel timer
     {
-        static bool back_was = false, fwd_was = false;
+        static bool     back_was = false, fwd_was = false;
+        static uint32_t fwd_press_ms = 0;
+        static bool     fwd_long_handled = false;
+        const uint32_t  POMODORO_LONG_PRESS_MS = 1000;
+
         bool back_now = (BTN_BACK >= 0) && (digitalRead(BTN_BACK) == LOW);
         bool fwd_now  = (BTN_FWD  >= 0) && (digitalRead(BTN_FWD)  == LOW);
 
+        // LEFT (Space / push-to-talk): unchanged — fires on press and
+        // releases on release for proper key-down behaviour.
         if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
+            if (back_now) ble_keyboard_press(0x2C, 0);
             else          ble_keyboard_release();
             back_was = back_now;
         }
-        if (fwd_now != fwd_was) {
-            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-            else         ble_keyboard_release();
-            fwd_was = fwd_now;
+
+        // RIGHT: differentiate short press vs long hold. Short = send
+        // Shift+Tab on release. Long (>= 1000ms held) = start Pomodoro
+        // immediately and suppress the Shift+Tab.
+        if (fwd_now && !fwd_was) {
+            // Press start
+            fwd_press_ms     = millis();
+            fwd_long_handled = false;
+        } else if (fwd_now && fwd_was && !fwd_long_handled) {
+            // Held — check long-press threshold
+            if (millis() - fwd_press_ms >= POMODORO_LONG_PRESS_MS) {
+                fwd_long_handled = true;
+                ui_pomodoro_start();
+            }
+        } else if (!fwd_now && fwd_was) {
+            // Released — send Shift+Tab only if it was a short press.
+            if (!fwd_long_handled) {
+                ble_keyboard_press(0x2B, 0x02);
+                delay(20);
+                ble_keyboard_release();
+            }
         }
+        fwd_was = fwd_now;
 
         if (power_pwr_pressed()) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
+            if (ui_pomodoro_active()) {
+                ui_pomodoro_cancel();
+            } else if (ui_get_current_screen() == SCREEN_SPLASH) {
+                splash_next();
+            } else {
+                ui_cycle_screen();
+            }
         }
     }
 

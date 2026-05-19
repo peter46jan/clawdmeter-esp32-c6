@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "splash.h"
+#include "ble.h"
 #include <lvgl.h>
 #include "logo.h"
 #include "icons.h"
@@ -51,6 +52,25 @@ static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
 static lv_obj_t* lbl_ble_device;
 static lv_obj_t* lbl_ble_mac;
+
+// ---- Pomodoro screen widgets ----
+static lv_obj_t* pomo_container;
+static lv_obj_t* pomo_arc;
+static lv_obj_t* pomo_time_label;
+static lv_obj_t* pomo_label;        // "Focus" / "Done!"
+
+// Pomodoro state machine. start_ms is millis() at session start; the
+// session ends at start_ms + POMO_DURATION_MS. DONE_HOLD_MS keeps the
+// "Done!" message on-screen briefly after typing "/clear\n" so the user
+// gets a visual confirmation.
+enum pomo_state_t { POMO_IDLE, POMO_RUNNING, POMO_DONE };
+static pomo_state_t pomo_state = POMO_IDLE;
+static uint32_t     pomo_start_ms = 0;
+static uint32_t     pomo_done_ms  = 0;
+static screen_t     pomo_return_to = SCREEN_USAGE;
+
+#define POMO_DURATION_MS  (25UL * 60UL * 1000UL)
+#define POMO_DONE_HOLD_MS  4000UL
 
 // ---- Details screen widgets ----
 // Pared-down layout: title + big amount + budget subtitle + bar + percent.
@@ -364,6 +384,115 @@ static void init_details_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_extra_pct, LV_ALIGN_TOP_MID, 0, 210);
 }
 
+// ======== Pomodoro Screen (480x480) — long-press right to start ========
+
+static void init_pomodoro_screen(lv_obj_t* scr) {
+    pomo_container = lv_obj_create(scr);
+    lv_obj_set_size(pomo_container, SCR_W, SCR_H);
+    lv_obj_set_pos(pomo_container, 0, 0);
+    lv_obj_set_style_bg_color(pomo_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(pomo_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(pomo_container, 0, 0);
+    lv_obj_set_style_pad_all(pomo_container, 0, 0);
+    lv_obj_clear_flag(pomo_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Big arc — 360 px diameter, centered. Background ring is dim,
+    // indicator uses the accent colour. Sweep starts at the top.
+    pomo_arc = lv_arc_create(pomo_container);
+    lv_obj_set_size(pomo_arc, 360, 360);
+    lv_obj_center(pomo_arc);
+    lv_arc_set_rotation(pomo_arc, 270);
+    lv_arc_set_bg_angles(pomo_arc, 0, 360);
+    lv_arc_set_range(pomo_arc, 0, 1000);
+    lv_arc_set_value(pomo_arc, 0);
+    lv_obj_remove_style(pomo_arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(pomo_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(pomo_arc, 18, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(pomo_arc, 18, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(pomo_arc, COL_BAR_BG,  LV_PART_MAIN);
+    lv_obj_set_style_arc_color(pomo_arc, COL_ACCENT,  LV_PART_INDICATOR);
+
+    // Time remaining "MM:SS" inside the arc.
+    pomo_time_label = lv_label_create(pomo_container);
+    lv_label_set_text(pomo_time_label, "25:00");
+    lv_obj_set_style_text_font(pomo_time_label, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(pomo_time_label, COL_TEXT, 0);
+    lv_obj_align(pomo_time_label, LV_ALIGN_CENTER, 0, -8);
+
+    // Subtitle below the time — switches between "Focus" and "Done!".
+    pomo_label = lv_label_create(pomo_container);
+    lv_label_set_text(pomo_label, "Focus");
+    lv_obj_set_style_text_font(pomo_label, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(pomo_label, COL_DIM, 0);
+    lv_obj_align(pomo_label, LV_ALIGN_CENTER, 0, 56);
+
+    lv_obj_add_flag(pomo_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_pomodoro_start(void) {
+    if (pomo_state == POMO_RUNNING) return;  // already going
+    pomo_state    = POMO_RUNNING;
+    pomo_start_ms = lv_tick_get();
+    pomo_return_to = (current_screen == SCREEN_SPLASH) ? SCREEN_USAGE : current_screen;
+    lv_label_set_text(pomo_label, "Focus");
+    lv_obj_set_style_text_color(pomo_label, COL_DIM, 0);
+    lv_arc_set_value(pomo_arc, 0);
+    ui_show_screen(SCREEN_POMODORO);
+}
+
+void ui_pomodoro_cancel(void) {
+    if (pomo_state == POMO_IDLE) return;
+    pomo_state = POMO_IDLE;
+    ui_show_screen(pomo_return_to);
+}
+
+bool ui_pomodoro_active(void) {
+    return pomo_state != POMO_IDLE;
+}
+
+void ui_pomodoro_tick(void) {
+    if (pomo_state == POMO_IDLE) return;
+
+    uint32_t now = lv_tick_get();
+
+    if (pomo_state == POMO_RUNNING) {
+        uint32_t elapsed = now - pomo_start_ms;
+        if (elapsed >= POMO_DURATION_MS) {
+            // Session complete. Flash the panel and type "/clear\n" so
+            // the user lands in a fresh Claude conversation.
+            pomo_state = POMO_DONE;
+            pomo_done_ms = now;
+            lv_arc_set_value(pomo_arc, 1000);
+            lv_label_set_text(pomo_time_label, "00:00");
+            lv_label_set_text(pomo_label, "Done!");
+            lv_obj_set_style_text_color(pomo_label, COL_ACCENT, 0);
+            gfx->setBrightness(255);          // attention flash
+            ble_type_string("/clear\n");
+            return;
+        }
+        // Remaining time + arc progress.
+        uint32_t remaining_s = (POMO_DURATION_MS - elapsed + 999) / 1000;
+        uint32_t mm = remaining_s / 60;
+        uint32_t ss = remaining_s % 60;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02lu:%02lu",
+                 (unsigned long)mm, (unsigned long)ss);
+        lv_label_set_text(pomo_time_label, buf);
+        // Arc fills as time progresses — visually obvious how far in we are.
+        uint32_t progress = (uint32_t)((uint64_t)elapsed * 1000 / POMO_DURATION_MS);
+        lv_arc_set_value(pomo_arc, (int32_t)progress);
+        return;
+    }
+
+    if (pomo_state == POMO_DONE && (now - pomo_done_ms) >= POMO_DONE_HOLD_MS) {
+        // Done message has been shown long enough — restore brightness
+        // and pop back to the screen the user came from.
+        gfx->setBrightness(200);
+        pomo_state = POMO_IDLE;
+        ui_show_screen(pomo_return_to);
+    }
+}
+
 // ======== Bluetooth Screen (480x480) ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -471,6 +600,7 @@ void ui_init(void) {
     init_usage_screen(scr);
     init_details_screen(scr);
     init_bluetooth_screen(scr);
+    init_pomodoro_screen(scr);
     splash_init(scr);
 
     // Note: swipe gestures are detected in ui_touch_tick (called from
@@ -588,12 +718,15 @@ void ui_tick_anim(void) {
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
-// Hide the battery indicator on the splash screen — the icon is visually
-// noisy over the pixel-art creature animations.
+// Hide the battery indicator on the splash and pomodoro screens — the
+// icon is visually noisy over the pixel-art animations and competes with
+// the timer arc for attention.
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_screen == SCREEN_SPLASH || current_screen == SCREEN_POMODORO)
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
@@ -658,26 +791,34 @@ static void ble_reset_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(screen_t screen) {
-    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(usage_container,   LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(details_container, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ble_container,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(pomo_container,    LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container,   LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_DETAILS:    lv_obj_clear_flag(details_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container,     LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_POMODORO:   lv_obj_clear_flag(pomo_container,    LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
-    // Hide the logo overlay on the splash screen so the animation has a clean canvas
+    // Hide the logo overlay on the splash and pomodoro screens.
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH || screen == SCREEN_POMODORO)
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
+    // Don't memoise SPLASH or POMODORO as the "previous" screen — those
+    // are transient overlays. PWR / splash-toggle should always return to
+    // the regular Usage/Details/Bluetooth flow.
+    if (screen != SCREEN_SPLASH && screen != SCREEN_POMODORO)
+        prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
 }

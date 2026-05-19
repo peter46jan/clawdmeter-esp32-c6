@@ -283,3 +283,31 @@ void ble_keyboard_release(void) {
     input_kbd->setValue(report, sizeof(report));
     input_kbd->notify();
 }
+
+// HID usage codes for the small set of characters we type from the
+// pomodoro / scripted-text path. Lowercase only — we don't toggle shift.
+static uint8_t hid_code_for(char c) {
+    if (c >= 'a' && c <= 'z') return 0x04 + (c - 'a');
+    if (c == '0')             return 0x27;
+    if (c >= '1' && c <= '9') return 0x1E + (c - '1');
+    if (c == ' ')             return 0x2C;
+    if (c == '\n')            return 0x28;   // Enter
+    if (c == '/')             return 0x38;
+    if (c == '-')             return 0x2D;
+    if (c == '.')             return 0x37;
+    return 0;
+}
+
+void ble_type_string(const char* s) {
+    if (!s) return;
+    while (*s) {
+        uint8_t code = hid_code_for(*s);
+        if (code) {
+            ble_keyboard_press(code, 0);
+            delay(15);
+            ble_keyboard_release();
+            delay(15);
+        }
+        s++;
+    }
+}
