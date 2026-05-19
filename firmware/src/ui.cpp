@@ -53,23 +53,14 @@ static lv_obj_t* lbl_ble_device;
 static lv_obj_t* lbl_ble_mac;
 
 // ---- Details screen widgets ----
+// Pared-down layout: title + big amount + budget subtitle + bar + percent.
+// Uptime / last-update / reset countdowns were removed at user request.
 static lv_obj_t* details_container;
-static lv_obj_t* lbl_uptime_val;
-static lv_obj_t* lbl_last_update_val;
-static lv_obj_t* lbl_session_reset_exact;
-static lv_obj_t* lbl_weekly_reset_exact;
-static lv_obj_t* lbl_extra_usage_val;   // "$X.XX / $Y.YY"
-static lv_obj_t* lbl_extra_usage_pct;   // "Z% used"
+static lv_obj_t* lbl_extra_amount;   // big: "35.97"
+static lv_obj_t* lbl_extra_currency; // small ISO suffix next to amount: "EUR"
+static lv_obj_t* lbl_extra_budget;   // small: "of 50.00"
+static lv_obj_t* lbl_extra_pct;      // big: "72%"
 static lv_obj_t* bar_extra_usage;
-
-// Tracked state for the details screen.
-// data_received_ms = millis() at the moment we last received a UsageData
-// payload; combined with the original session/weekly reset_mins (counted at
-// that instant) we can re-render a live HH:MM:SS countdown on details.
-static uint32_t data_received_ms = 0;
-static int last_session_reset_mins = -1;
-static int last_weekly_reset_mins  = -1;
-static bool has_received_data = false;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -304,15 +295,17 @@ static void init_usage_screen(lv_obj_t* scr) {
 }
 
 // ======== Details Screen (480x480) — swipe target from Usage ========
-
-static void format_hms(uint32_t total_secs, char* buf, size_t len) {
-    uint32_t d = total_secs / 86400;
-    uint32_t h = (total_secs % 86400) / 3600;
-    uint32_t m = (total_secs % 3600) / 60;
-    uint32_t s = total_secs % 60;
-    if (d > 0) snprintf(buf, len, "%lud %02lu:%02lu:%02lu", (unsigned long)d, (unsigned long)h, (unsigned long)m, (unsigned long)s);
-    else       snprintf(buf, len, "%02lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)s);
-}
+//
+// One job: show "Extra usage" — what you've spent this month against the
+// monthly limit Anthropic shows in console.anthropic.com.
+//
+// Layout:
+//   title "Extra usage" (Tiempos 56, top centred)
+//   amount       (Tiempos 56)  — big number, e.g. "35.97"
+//   currency     (Styrene 28)  — ISO code suffix, e.g. "EUR"
+//   "of 50.00"   (Styrene 28)  — dim budget reference
+//   bar          full-width, taller than the usage screen bars
+//   "72%"        (Styrene 48)  — bottom, dim accent
 
 static void init_details_screen(lv_obj_t* scr) {
     details_container = lv_obj_create(scr);
@@ -326,96 +319,49 @@ static void init_details_screen(lv_obj_t* scr) {
 
     // Title
     lv_obj_t* title = lv_label_create(details_container);
-    lv_label_set_text(title, "Details");
+    lv_label_set_text(title, "Extra usage");
     lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
-    // Tighter panel heights so a third (Extra usage) row fits in 480px.
-    const int DETAIL_PANEL_H = 130;
-    const int DETAIL_GAP     = 12;
+    // Single content panel takes most of the screen, centered.
+    const int PANEL_TOP    = 130;
+    const int PANEL_HEIGHT = 320;
+    lv_obj_t* p = make_panel(details_container, MARGIN, PANEL_TOP, CONTENT_W, PANEL_HEIGHT);
+    lv_obj_set_style_pad_all(p, 24, 0);
 
-    // Top panel: uptime + last update
-    lv_obj_t* p1 = make_panel(details_container, MARGIN, CONTENT_Y, CONTENT_W, DETAIL_PANEL_H);
+    // Big amount, right-aligned to leave room for the currency suffix.
+    lbl_extra_amount = lv_label_create(p);
+    lv_label_set_text(lbl_extra_amount, "---");
+    lv_obj_set_style_text_font(lbl_extra_amount, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_extra_amount, COL_TEXT, 0);
+    lv_obj_align(lbl_extra_amount, LV_ALIGN_TOP_MID, -32, 12);
 
-    lv_obj_t* lbl_uptime = lv_label_create(p1);
-    lv_label_set_text(lbl_uptime, "Uptime");
-    lv_obj_set_style_text_font(lbl_uptime, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_uptime, COL_DIM, 0);
-    lv_obj_set_pos(lbl_uptime, 0, 0);
+    // Currency code immediately after the amount, baseline-aligned visually.
+    lbl_extra_currency = lv_label_create(p);
+    lv_label_set_text(lbl_extra_currency, "");
+    lv_obj_set_style_text_font(lbl_extra_currency, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_extra_currency, COL_DIM, 0);
+    lv_obj_align_to(lbl_extra_currency, lbl_extra_amount, LV_ALIGN_OUT_RIGHT_BOTTOM, 10, -8);
 
-    lbl_uptime_val = lv_label_create(p1);
-    lv_label_set_text(lbl_uptime_val, "00:00:00");
-    lv_obj_set_style_text_font(lbl_uptime_val, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_uptime_val, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_uptime_val, 0, 36);
+    // "of 50.00" subtitle, centred under the amount.
+    lbl_extra_budget = lv_label_create(p);
+    lv_label_set_text(lbl_extra_budget, "");
+    lv_obj_set_style_text_font(lbl_extra_budget, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_extra_budget, COL_DIM, 0);
+    lv_obj_align(lbl_extra_budget, LV_ALIGN_TOP_MID, 0, 94);
 
-    lv_obj_t* lbl_last_update = lv_label_create(p1);
-    lv_label_set_text(lbl_last_update, "Last update");
-    lv_obj_set_style_text_font(lbl_last_update, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_last_update, COL_DIM, 0);
-    lv_obj_set_pos(lbl_last_update, 0, 90);
+    // Beefy progress bar (taller than the usage-screen bars so it reads
+    // as the main thing on this screen).
+    bar_extra_usage = make_bar(p, 0, 160, CONTENT_W - 48, 32);
 
-    lbl_last_update_val = lv_label_create(p1);
-    lv_label_set_text(lbl_last_update_val, "no data yet");
-    lv_obj_set_style_text_font(lbl_last_update_val, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_last_update_val, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_last_update_val, 0, 102);
-
-    // Middle panel: exact reset countdowns
-    lv_obj_t* p2 = make_panel(details_container, MARGIN,
-                              CONTENT_Y + DETAIL_PANEL_H + DETAIL_GAP,
-                              CONTENT_W, DETAIL_PANEL_H);
-
-    lv_obj_t* lbl_session_t = lv_label_create(p2);
-    lv_label_set_text(lbl_session_t, "Session resets in");
-    lv_obj_set_style_text_font(lbl_session_t, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_session_t, COL_DIM, 0);
-    lv_obj_set_pos(lbl_session_t, 0, 0);
-
-    lbl_session_reset_exact = lv_label_create(p2);
-    lv_label_set_text(lbl_session_reset_exact, "--:--:--");
-    lv_obj_set_style_text_font(lbl_session_reset_exact, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_session_reset_exact, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_session_reset_exact, 0, 36);
-
-    lv_obj_t* lbl_weekly_t = lv_label_create(p2);
-    lv_label_set_text(lbl_weekly_t, "Weekly resets in");
-    lv_obj_set_style_text_font(lbl_weekly_t, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_weekly_t, COL_DIM, 0);
-    lv_obj_set_pos(lbl_weekly_t, 0, 72);
-
-    lbl_weekly_reset_exact = lv_label_create(p2);
-    lv_label_set_text(lbl_weekly_reset_exact, "--d --:--");
-    lv_obj_set_style_text_font(lbl_weekly_reset_exact, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_weekly_reset_exact, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_weekly_reset_exact, 0, 100);
-
-    // Bottom panel: Extra usage (month-to-date Anthropic Admin API spend
-    // vs configured budget). Hidden if the daemon doesn't provide it.
-    lv_obj_t* p3 = make_panel(details_container, MARGIN,
-                              CONTENT_Y + 2 * (DETAIL_PANEL_H + DETAIL_GAP),
-                              CONTENT_W, DETAIL_PANEL_H);
-
-    lv_obj_t* lbl_eu_t = lv_label_create(p3);
-    lv_label_set_text(lbl_eu_t, "Extra usage");
-    lv_obj_set_style_text_font(lbl_eu_t, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_eu_t, COL_DIM, 0);
-    lv_obj_set_pos(lbl_eu_t, 0, 0);
-
-    lbl_extra_usage_val = lv_label_create(p3);
-    lv_label_set_text(lbl_extra_usage_val, "$---");
-    lv_obj_set_style_text_font(lbl_extra_usage_val, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_extra_usage_val, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_extra_usage_val, 0, 30);
-
-    lbl_extra_usage_pct = lv_label_create(p3);
-    lv_label_set_text(lbl_extra_usage_pct, "");
-    lv_obj_set_style_text_font(lbl_extra_usage_pct, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_extra_usage_pct, COL_DIM, 0);
-    lv_obj_align(lbl_extra_usage_pct, LV_ALIGN_TOP_RIGHT, 0, 8);
-
-    bar_extra_usage = make_bar(p3, 0, 84, CONTENT_W - 32, 18);
+    // Big "72%" label under the bar — same dim-accent treatment as the
+    // budget line so the eye lands on the amount first.
+    lbl_extra_pct = lv_label_create(p);
+    lv_label_set_text(lbl_extra_pct, "---");
+    lv_obj_set_style_text_font(lbl_extra_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_extra_pct, COL_DIM, 0);
+    lv_obj_align(lbl_extra_pct, LV_ALIGN_TOP_MID, 0, 210);
 }
 
 // ======== Bluetooth Screen (480x480) ========
@@ -552,13 +498,6 @@ void ui_init(void) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
-    // Snapshot reset offsets at the moment of receipt — details screen
-    // uses these + elapsed millis() to render a live HH:MM:SS countdown.
-    data_received_ms = lv_tick_get();
-    last_session_reset_mins = data->session_reset_mins;
-    last_weekly_reset_mins  = data->weekly_reset_mins;
-    has_received_data = true;
-
     int s_pct = (int)(data->session_pct + 0.5f);
 
     // Usage screen
@@ -580,32 +519,46 @@ void ui_update(const UsageData* data) {
 
     // Extra usage from /api/oauth/usage. Spend < 0 means the daemon
     // couldn't fetch it (token scope, API change, etc.) — show dashes.
+    //
+    // We format into stack buffers first and call lv_label_set_text. The
+    // LVGL-internal printf path (set_text_fmt) had a crash with "%s" on
+    // C6 — see commit history. libc snprintf is fine.
     if (data->extra_budget_amount > 0.0f && data->extra_usage_amount >= 0.0f) {
         float used = data->extra_usage_amount;
         float bud  = data->extra_budget_amount;
         int pct = (int)((used / bud) * 100.0f + 0.5f);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
-        // Build the label into a stack buffer first. Passing
-        // data->extra_currency directly to lv_label_set_text_fmt's "%s"
-        // crashes LVGL on the C6 build (lv_vsnprintf → lv_strnlen reads
-        // past the end of memory). Format ourselves with the safer libc
-        // snprintf, then hand a known-terminated buffer to LVGL.
-        // Fonts are ASCII only — no €/$/£ glyphs — so we put the ISO code
-        // after the amount: "35.97 / 50.00 EUR".
+
         char cur[8];
         strlcpy(cur, data->extra_currency, sizeof(cur));
-        char line[40];
-        snprintf(line, sizeof(line), "%.2f / %.2f %s", used, bud, cur);
-        lv_label_set_text(lbl_extra_usage_val, line);
-        char pctbuf[16];
-        snprintf(pctbuf, sizeof(pctbuf), "%d%% used", pct);
-        lv_label_set_text(lbl_extra_usage_pct, pctbuf);
+
+        char amount[16];
+        snprintf(amount, sizeof(amount), "%.2f", used);
+        lv_label_set_text(lbl_extra_amount, amount);
+
+        lv_label_set_text(lbl_extra_currency, cur);
+
+        char budline[32];
+        snprintf(budline, sizeof(budline), "of %.2f", bud);
+        lv_label_set_text(lbl_extra_budget, budline);
+
+        char pctbuf[8];
+        snprintf(pctbuf, sizeof(pctbuf), "%d%%", pct);
+        lv_label_set_text(lbl_extra_pct, pctbuf);
+
         lv_bar_set_value(bar_extra_usage, pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_extra_usage, pct_color((float)pct), LV_PART_INDICATOR);
+
+        // Re-centre the amount + currency pair after the text width changed.
+        lv_obj_update_layout(lbl_extra_amount);
+        lv_obj_align_to(lbl_extra_currency, lbl_extra_amount,
+                        LV_ALIGN_OUT_RIGHT_BOTTOM, 10, -8);
     } else {
-        lv_label_set_text(lbl_extra_usage_val, "--- / ---");
-        lv_label_set_text(lbl_extra_usage_pct, "no data");
+        lv_label_set_text(lbl_extra_amount, "---");
+        lv_label_set_text(lbl_extra_currency, "");
+        lv_label_set_text(lbl_extra_budget, "no data yet");
+        lv_label_set_text(lbl_extra_pct, "");
         lv_bar_set_value(bar_extra_usage, 0, LV_ANIM_OFF);
     }
 }
@@ -739,51 +692,6 @@ void ui_cycle_screen(void) {
         next = SCREEN_BLUETOOTH;
     }
     ui_show_screen(next);
-}
-
-void ui_tick_details(void) {
-    if (current_screen != SCREEN_DETAILS) return;
-
-    uint32_t now = lv_tick_get();
-    char buf[48];
-
-    // Uptime since boot.
-    format_hms(now / 1000, buf, sizeof(buf));
-    lv_label_set_text(lbl_uptime_val, buf);
-
-    // Last update, relative to now.
-    if (!has_received_data) {
-        lv_label_set_text(lbl_last_update_val, "no data yet");
-    } else {
-        uint32_t age = (now - data_received_ms) / 1000;
-        if (age < 60)        snprintf(buf, sizeof(buf), "%lus ago", (unsigned long)age);
-        else if (age < 3600) snprintf(buf, sizeof(buf), "%lum %lus ago",
-                                       (unsigned long)(age / 60), (unsigned long)(age % 60));
-        else                 snprintf(buf, sizeof(buf), "%luh %lum ago",
-                                       (unsigned long)(age / 3600), (unsigned long)((age % 3600) / 60));
-        lv_label_set_text(lbl_last_update_val, buf);
-    }
-
-    // Live countdown — subtract elapsed seconds from the snapshotted minute
-    // values. Clamps at zero (server will issue a reset event shortly).
-    if (last_session_reset_mins < 0) {
-        lv_label_set_text(lbl_session_reset_exact, "--:--:--");
-    } else {
-        int32_t remaining = (int32_t)last_session_reset_mins * 60
-                          - (int32_t)((now - data_received_ms) / 1000);
-        if (remaining < 0) remaining = 0;
-        format_hms((uint32_t)remaining, buf, sizeof(buf));
-        lv_label_set_text(lbl_session_reset_exact, buf);
-    }
-    if (last_weekly_reset_mins < 0) {
-        lv_label_set_text(lbl_weekly_reset_exact, "--d --:--");
-    } else {
-        int32_t remaining = (int32_t)last_weekly_reset_mins * 60
-                          - (int32_t)((now - data_received_ms) / 1000);
-        if (remaining < 0) remaining = 0;
-        format_hms((uint32_t)remaining, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset_exact, buf);
-    }
 }
 
 void ui_toggle_splash(void) {

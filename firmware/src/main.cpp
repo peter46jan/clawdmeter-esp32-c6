@@ -464,7 +464,6 @@ void loop() {
     }
     lv_timer_handler();
     ui_tick_anim();
-    ui_tick_details();
     ble_tick();
     power_tick();
     imu_tick();
