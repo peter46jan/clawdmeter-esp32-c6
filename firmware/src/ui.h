@@ -5,6 +5,7 @@
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
+    SCREEN_DETAILS,
     SCREEN_BLUETOOTH,
     SCREEN_COUNT,
 };
@@ -12,6 +13,7 @@ enum screen_t {
 void ui_init(void);
 void ui_update(const UsageData* data);
 void ui_tick_anim(void);
+void ui_tick_details(void);
 void ui_show_screen(screen_t screen);
 void ui_cycle_screen(void);
 void ui_toggle_splash(void);

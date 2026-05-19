@@ -56,8 +56,23 @@ static void IRAM_ATTR touch_isr(void) {
     touch_data_ready = true;
 }
 
+// Poll touch every loop iteration in addition to the ISR. The CST92xx
+// reportedly only pulses INT on initial press on some board revisions, so
+// LVGL would otherwise see a single point per tap — fine for clicks, but
+// gesture detection (swipe → / ←) needs a continuous stream of points to
+// compute a direction. Polling at ~loop-rate (LVGL itself runs ~60 Hz)
+// gives ~16 ms sampling which is plenty for swipes.
+static uint32_t last_touch_poll_ms = 0;
+#define TOUCH_POLL_INTERVAL_MS 15
+
 static void touch_read() {
-    if (!touch_data_ready) return;
+    bool poll = touch_data_ready;
+    uint32_t now = millis();
+    if (now - last_touch_poll_ms >= TOUCH_POLL_INTERVAL_MS) {
+        poll = true;
+        last_touch_poll_ms = now;
+    }
+    if (!poll) return;
     touch_data_ready = false;
 
     int16_t tx[5], ty[5];
@@ -247,6 +262,8 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    out->extra_usage_usd  = doc["eu"] | -1.0f;
+    out->extra_budget_usd = doc["em"] | -1.0f;
     out->valid = true;
     return true;
 }
@@ -426,6 +443,7 @@ void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
+    ui_tick_details();
     ble_tick();
     power_tick();
     imu_tick();

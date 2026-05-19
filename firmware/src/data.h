@@ -9,4 +9,9 @@ struct UsageData {
     char status[16];         // "allowed" or "limited"
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+
+    // Month-to-date API spend via Anthropic Admin API cost_report.
+    // < 0 means "not provided" (no admin key configured).
+    float extra_usage_usd;
+    float extra_budget_usd;
 };

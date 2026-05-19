@@ -36,7 +36,18 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 
+# Optional: Anthropic Admin API key for month-to-date spend ("Extra usage"
+# in console.anthropic.com). Falls back gracefully — if no key is found,
+# the daemon just skips the extra cost fields and the firmware shows "—".
+ADMIN_KEY_PATH = Path.home() / ".claude" / ".admin_key"
+ADMIN_KEY_ENV  = "ANTHROPIC_ADMIN_API_KEY"
+# Monthly budget for the "Extra usage" bar (USD). Override via env.
+BUDGET_USD = float(os.environ.get("CLAWDMETER_BUDGET_USD", "50"))
+# Cost report API is rate-limited and the data only moves slowly — cache.
+COST_CACHE_SECS = 300
+
 API_URL = "https://api.anthropic.com/v1/messages"
+COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -48,6 +59,9 @@ API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+
+# (timestamp, usd_amount) — populated by fetch_monthly_cost_usd.
+_cost_cache: tuple[float, float] | None = None
 
 
 def log(msg: str) -> None:
@@ -157,6 +171,82 @@ async def scan_for_device() -> str | None:
     return None
 
 
+def read_admin_key() -> str | None:
+    """Look up the Anthropic Admin API key.
+
+    Checks (in order): env var ANTHROPIC_ADMIN_API_KEY, then a plain-text
+    file at ~/.claude/.admin_key. Returns None if neither is set.
+    """
+    key = os.environ.get(ADMIN_KEY_ENV)
+    if key:
+        return key.strip()
+    if ADMIN_KEY_PATH.is_file():
+        try:
+            k = ADMIN_KEY_PATH.read_text(encoding="utf-8").strip()
+            return k or None
+        except OSError as e:
+            log(f"Admin key file unreadable: {e}")
+    return None
+
+
+async def fetch_monthly_cost_usd() -> float | None:
+    """Sum cost_report buckets for the current calendar month (UTC), USD.
+
+    Cached for COST_CACHE_SECS to avoid hammering the admin API. Returns
+    None if no admin key is configured or the call fails.
+    """
+    global _cost_cache
+    now = time.time()
+    if _cost_cache and (now - _cost_cache[0]) < COST_CACHE_SECS:
+        return _cost_cache[1]
+
+    key = read_admin_key()
+    if not key:
+        return None
+
+    # First of the current UTC month, ISO-8601 / RFC 3339.
+    t = time.gmtime(now)
+    starting_at = f"{t.tm_year:04d}-{t.tm_mon:02d}-01T00:00:00Z"
+
+    headers = {
+        "anthropic-version": "2023-06-01",
+        "X-Api-Key": key,
+    }
+    params = {"starting_at": starting_at, "bucket_width": "1d"}
+
+    total_cents = 0.0
+    page: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            while True:
+                p = dict(params)
+                if page:
+                    p["page"] = page
+                resp = await http.get(COST_URL, headers=headers, params=p)
+                if resp.status_code >= 400:
+                    log(f"cost_report HTTP {resp.status_code}: {resp.text[:200]}")
+                    return None
+                body = resp.json()
+                for bucket in body.get("data", []):
+                    for item in bucket.get("results", []):
+                        try:
+                            total_cents += float(item.get("amount", "0"))
+                        except (TypeError, ValueError):
+                            pass
+                if not body.get("has_more"):
+                    break
+                page = body.get("next_page")
+                if not page:
+                    break
+    except httpx.HTTPError as e:
+        log(f"cost_report call failed: {e}")
+        return None
+
+    total_usd = round(total_cents / 100.0, 2)
+    _cost_cache = (now, total_usd)
+    return total_usd
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -197,6 +287,14 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
+
+    # Optional: month-to-date Admin API spend (USD). Only included when an
+    # admin key is configured. Firmware treats missing fields as "no data".
+    cost = await fetch_monthly_cost_usd()
+    if cost is not None:
+        payload["eu"] = cost
+        payload["em"] = BUDGET_USD
+
     return payload
 
 

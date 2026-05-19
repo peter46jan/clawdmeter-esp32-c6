@@ -52,6 +52,25 @@ static lv_obj_t* lbl_ble_status;
 static lv_obj_t* lbl_ble_device;
 static lv_obj_t* lbl_ble_mac;
 
+// ---- Details screen widgets ----
+static lv_obj_t* details_container;
+static lv_obj_t* lbl_uptime_val;
+static lv_obj_t* lbl_last_update_val;
+static lv_obj_t* lbl_session_reset_exact;
+static lv_obj_t* lbl_weekly_reset_exact;
+static lv_obj_t* lbl_extra_usage_val;   // "$X.XX / $Y.YY"
+static lv_obj_t* lbl_extra_usage_pct;   // "Z% used"
+static lv_obj_t* bar_extra_usage;
+
+// Tracked state for the details screen.
+// data_received_ms = millis() at the moment we last received a UsageData
+// payload; combined with the original session/weekly reset_mins (counted at
+// that instant) we can re-render a live HH:MM:SS countdown on details.
+static uint32_t data_received_ms = 0;
+static int last_session_reset_mins = -1;
+static int last_weekly_reset_mins  = -1;
+static bool has_received_data = false;
+
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
@@ -139,6 +158,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
+static void swipe_gesture_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -279,6 +299,121 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
+// ======== Details Screen (480x480) — swipe target from Usage ========
+
+static void format_hms(uint32_t total_secs, char* buf, size_t len) {
+    uint32_t d = total_secs / 86400;
+    uint32_t h = (total_secs % 86400) / 3600;
+    uint32_t m = (total_secs % 3600) / 60;
+    uint32_t s = total_secs % 60;
+    if (d > 0) snprintf(buf, len, "%lud %02lu:%02lu:%02lu", (unsigned long)d, (unsigned long)h, (unsigned long)m, (unsigned long)s);
+    else       snprintf(buf, len, "%02lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)s);
+}
+
+static void init_details_screen(lv_obj_t* scr) {
+    details_container = lv_obj_create(scr);
+    lv_obj_set_size(details_container, SCR_W, SCR_H);
+    lv_obj_set_pos(details_container, 0, 0);
+    lv_obj_set_style_bg_opa(details_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(details_container, 0, 0);
+    lv_obj_set_style_pad_all(details_container, 0, 0);
+    lv_obj_clear_flag(details_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(details_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    // Title
+    lv_obj_t* title = lv_label_create(details_container);
+    lv_label_set_text(title, "Details");
+    lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+
+    // Tighter panel heights so a third (Extra usage) row fits in 480px.
+    const int DETAIL_PANEL_H = 130;
+    const int DETAIL_GAP     = 12;
+
+    // Top panel: uptime + last update
+    lv_obj_t* p1 = make_panel(details_container, MARGIN, CONTENT_Y, CONTENT_W, DETAIL_PANEL_H);
+
+    lv_obj_t* lbl_uptime = lv_label_create(p1);
+    lv_label_set_text(lbl_uptime, "Uptime");
+    lv_obj_set_style_text_font(lbl_uptime, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_uptime, COL_DIM, 0);
+    lv_obj_set_pos(lbl_uptime, 0, 0);
+
+    lbl_uptime_val = lv_label_create(p1);
+    lv_label_set_text(lbl_uptime_val, "00:00:00");
+    lv_obj_set_style_text_font(lbl_uptime_val, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_uptime_val, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_uptime_val, 0, 36);
+
+    lv_obj_t* lbl_last_update = lv_label_create(p1);
+    lv_label_set_text(lbl_last_update, "Last update");
+    lv_obj_set_style_text_font(lbl_last_update, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_last_update, COL_DIM, 0);
+    lv_obj_set_pos(lbl_last_update, 0, 90);
+
+    lbl_last_update_val = lv_label_create(p1);
+    lv_label_set_text(lbl_last_update_val, "no data yet");
+    lv_obj_set_style_text_font(lbl_last_update_val, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_last_update_val, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_last_update_val, 0, 102);
+
+    // Middle panel: exact reset countdowns
+    lv_obj_t* p2 = make_panel(details_container, MARGIN,
+                              CONTENT_Y + DETAIL_PANEL_H + DETAIL_GAP,
+                              CONTENT_W, DETAIL_PANEL_H);
+
+    lv_obj_t* lbl_session_t = lv_label_create(p2);
+    lv_label_set_text(lbl_session_t, "Session resets in");
+    lv_obj_set_style_text_font(lbl_session_t, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_session_t, COL_DIM, 0);
+    lv_obj_set_pos(lbl_session_t, 0, 0);
+
+    lbl_session_reset_exact = lv_label_create(p2);
+    lv_label_set_text(lbl_session_reset_exact, "--:--:--");
+    lv_obj_set_style_text_font(lbl_session_reset_exact, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_session_reset_exact, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_session_reset_exact, 0, 36);
+
+    lv_obj_t* lbl_weekly_t = lv_label_create(p2);
+    lv_label_set_text(lbl_weekly_t, "Weekly resets in");
+    lv_obj_set_style_text_font(lbl_weekly_t, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_weekly_t, COL_DIM, 0);
+    lv_obj_set_pos(lbl_weekly_t, 0, 72);
+
+    lbl_weekly_reset_exact = lv_label_create(p2);
+    lv_label_set_text(lbl_weekly_reset_exact, "--d --:--");
+    lv_obj_set_style_text_font(lbl_weekly_reset_exact, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_weekly_reset_exact, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_weekly_reset_exact, 0, 100);
+
+    // Bottom panel: Extra usage (month-to-date Anthropic Admin API spend
+    // vs configured budget). Hidden if the daemon doesn't provide it.
+    lv_obj_t* p3 = make_panel(details_container, MARGIN,
+                              CONTENT_Y + 2 * (DETAIL_PANEL_H + DETAIL_GAP),
+                              CONTENT_W, DETAIL_PANEL_H);
+
+    lv_obj_t* lbl_eu_t = lv_label_create(p3);
+    lv_label_set_text(lbl_eu_t, "Extra usage");
+    lv_obj_set_style_text_font(lbl_eu_t, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_eu_t, COL_DIM, 0);
+    lv_obj_set_pos(lbl_eu_t, 0, 0);
+
+    lbl_extra_usage_val = lv_label_create(p3);
+    lv_label_set_text(lbl_extra_usage_val, "$---");
+    lv_obj_set_style_text_font(lbl_extra_usage_val, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_extra_usage_val, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_extra_usage_val, 0, 30);
+
+    lbl_extra_usage_pct = lv_label_create(p3);
+    lv_label_set_text(lbl_extra_usage_pct, "");
+    lv_obj_set_style_text_font(lbl_extra_usage_pct, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_extra_usage_pct, COL_DIM, 0);
+    lv_obj_align(lbl_extra_usage_pct, LV_ALIGN_TOP_RIGHT, 0, 8);
+
+    bar_extra_usage = make_bar(p3, 0, 84, CONTENT_W - 32, 18);
+}
+
 // ======== Bluetooth Screen (480x480) ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -384,8 +519,13 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_details_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
+
+    // Swipe gestures on Usage ↔ Details. Bubbles up from child taps too.
+    lv_obj_add_event_cb(usage_container,   swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(details_container, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     // Splash is touch-toggled — tap anywhere on the splash dismisses it
     if (splash_get_root()) {
@@ -406,6 +546,13 @@ void ui_init(void) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
+    // Snapshot reset offsets at the moment of receipt — details screen
+    // uses these + elapsed millis() to render a live HH:MM:SS countdown.
+    data_received_ms = lv_tick_get();
+    last_session_reset_mins = data->session_reset_mins;
+    last_weekly_reset_mins  = data->weekly_reset_mins;
+    has_received_data = true;
+
     int s_pct = (int)(data->session_pct + 0.5f);
 
     // Usage screen
@@ -424,6 +571,24 @@ void ui_update(const UsageData* data) {
 
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
+
+    // Extra usage (month-to-date Admin API spend). Daemon sends -1 when no
+    // admin key is configured — render dashes and an empty bar in that case.
+    if (data->extra_budget_usd > 0.0f && data->extra_usage_usd >= 0.0f) {
+        float used = data->extra_usage_usd;
+        float bud  = data->extra_budget_usd;
+        int pct = (int)((used / bud) * 100.0f + 0.5f);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        lv_label_set_text_fmt(lbl_extra_usage_val, "$%.2f / $%.2f", used, bud);
+        lv_label_set_text_fmt(lbl_extra_usage_pct, "%d%% used", pct);
+        lv_bar_set_value(bar_extra_usage, pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_extra_usage, pct_color((float)pct), LV_PART_INDICATOR);
+    } else {
+        lv_label_set_text(lbl_extra_usage_val, "$--- / $---");
+        lv_label_set_text(lbl_extra_usage_pct, "no admin key");
+        lv_bar_set_value(bar_extra_usage, 0, LV_ANIM_OFF);
+    }
 }
 
 void ui_tick_anim(void) {
@@ -476,12 +641,14 @@ static void ble_reset_click_cb(lv_event_t* e) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(details_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_DETAILS:    lv_obj_clear_flag(details_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -498,8 +665,76 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_BLUETOOTH : SCREEN_USAGE;
+    // PWR button: cycles between Usage/Details and Bluetooth, preserving
+    // which "data" screen the user last viewed.
+    screen_t next;
+    if (current_screen == SCREEN_BLUETOOTH) {
+        next = (prev_non_splash_screen == SCREEN_DETAILS) ? SCREEN_DETAILS : SCREEN_USAGE;
+    } else {
+        next = SCREEN_BLUETOOTH;
+    }
     ui_show_screen(next);
+}
+
+// LVGL gesture event: swipe left from Usage → Details; swipe right from
+// Details → Usage. Bluetooth and Splash ignore swipes (BT has its own tap
+// zones, splash has its own touch-toggle handler).
+static void swipe_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+
+    if (current_screen == SCREEN_USAGE && dir == LV_DIR_LEFT) {
+        ui_show_screen(SCREEN_DETAILS);
+    } else if (current_screen == SCREEN_DETAILS && dir == LV_DIR_RIGHT) {
+        ui_show_screen(SCREEN_USAGE);
+    }
+}
+
+void ui_tick_details(void) {
+    if (current_screen != SCREEN_DETAILS) return;
+
+    uint32_t now = lv_tick_get();
+    char buf[48];
+
+    // Uptime since boot.
+    format_hms(now / 1000, buf, sizeof(buf));
+    lv_label_set_text(lbl_uptime_val, buf);
+
+    // Last update, relative to now.
+    if (!has_received_data) {
+        lv_label_set_text(lbl_last_update_val, "no data yet");
+    } else {
+        uint32_t age = (now - data_received_ms) / 1000;
+        if (age < 60)        snprintf(buf, sizeof(buf), "%lus ago", (unsigned long)age);
+        else if (age < 3600) snprintf(buf, sizeof(buf), "%lum %lus ago",
+                                       (unsigned long)(age / 60), (unsigned long)(age % 60));
+        else                 snprintf(buf, sizeof(buf), "%luh %lum ago",
+                                       (unsigned long)(age / 3600), (unsigned long)((age % 3600) / 60));
+        lv_label_set_text(lbl_last_update_val, buf);
+    }
+
+    // Live countdown — subtract elapsed seconds from the snapshotted minute
+    // values. Clamps at zero (server will issue a reset event shortly).
+    if (last_session_reset_mins < 0) {
+        lv_label_set_text(lbl_session_reset_exact, "--:--:--");
+    } else {
+        int32_t remaining = (int32_t)last_session_reset_mins * 60
+                          - (int32_t)((now - data_received_ms) / 1000);
+        if (remaining < 0) remaining = 0;
+        format_hms((uint32_t)remaining, buf, sizeof(buf));
+        lv_label_set_text(lbl_session_reset_exact, buf);
+    }
+    if (last_weekly_reset_mins < 0) {
+        lv_label_set_text(lbl_weekly_reset_exact, "--d --:--");
+    } else {
+        int32_t remaining = (int32_t)last_weekly_reset_mins * 60
+                          - (int32_t)((now - data_received_ms) / 1000);
+        if (remaining < 0) remaining = 0;
+        format_hms((uint32_t)remaining, buf, sizeof(buf));
+        lv_label_set_text(lbl_weekly_reset_exact, buf);
+    }
 }
 
 void ui_toggle_splash(void) {
