@@ -445,7 +445,22 @@ void loop() {
     // the same touch — that way ui_touch_tick can mark a swipe as
     // "handled" and the global_click_cb in ui.cpp will skip the splash
     // toggle when LVGL fires CLICKED on release.
-    ui_touch_tick(touch_pressed, touch_x, touch_y);
+    //
+    // Rotation handling: the display is CPU-rotated in my_flush_cb but the
+    // touch sensor still reports physical coordinates. Translate physical
+    // → logical (screen-space) so a left-swipe is always "decreasing x in
+    // the image the user sees" regardless of how the device is held.
+    {
+        int lx = touch_x, ly = touch_y;
+        const int S = LCD_WIDTH;  // square panel; W == H
+        switch (imu_get_rotation()) {
+        case 1: lx = touch_y;          ly = S - 1 - touch_x; break;  // 90°  CW
+        case 2: lx = S - 1 - touch_x;  ly = S - 1 - touch_y; break;  // 180°
+        case 3: lx = S - 1 - touch_y;  ly = touch_x;          break;  // 270° CW
+        default: break;  // r=0, no transform
+        }
+        ui_touch_tick(touch_pressed, lx, ly);
+    }
     lv_timer_handler();
     ui_tick_anim();
     ui_tick_details();
