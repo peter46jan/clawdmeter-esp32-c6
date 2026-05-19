@@ -36,18 +36,14 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 
-# Optional: Anthropic Admin API key for month-to-date spend ("Extra usage"
-# in console.anthropic.com). Falls back gracefully — if no key is found,
-# the daemon just skips the extra cost fields and the firmware shows "—".
-ADMIN_KEY_PATH = Path.home() / ".claude" / ".admin_key"
-ADMIN_KEY_ENV  = "ANTHROPIC_ADMIN_API_KEY"
-# Monthly budget for the "Extra usage" bar (USD). Override via env.
-BUDGET_USD = float(os.environ.get("CLAWDMETER_BUDGET_USD", "50"))
-# Cost report API is rate-limited and the data only moves slowly — cache.
-COST_CACHE_SECS = 300
+# Override the OAuth-reported Extra-usage limit (USD). Most users leave
+# this unset — the value from the API is what claude.ai shows.
+BUDGET_OVERRIDE_USD = os.environ.get("CLAWDMETER_BUDGET_USD")
+# OAuth usage endpoint isn't free to call — cache.
+OAUTH_USAGE_CACHE_SECS = 60
 
 API_URL = "https://api.anthropic.com/v1/messages"
-COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -60,8 +56,8 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
-# (timestamp, usd_amount) — populated by fetch_monthly_cost_usd.
-_cost_cache: tuple[float, float] | None = None
+# (timestamp, payload dict) — populated by fetch_oauth_usage.
+_oauth_usage_cache: tuple[float, dict] | None = None
 
 
 def log(msg: str) -> None:
@@ -171,80 +167,103 @@ async def scan_for_device() -> str | None:
     return None
 
 
-def read_admin_key() -> str | None:
-    """Look up the Anthropic Admin API key.
+async def fetch_oauth_usage(token: str) -> dict | None:
+    """Query the OAuth usage endpoint for windowed utilization + extra usage.
 
-    Checks (in order): env var ANTHROPIC_ADMIN_API_KEY, then a plain-text
-    file at ~/.claude/.admin_key. Returns None if neither is set.
+    Uses the same OAuth Bearer token Claude Code already stores. The
+    endpoint requires the `user:profile` scope on the token — CLI tokens
+    that only have `user:inference` will 401/403 here. Result is cached
+    briefly so the daemon doesn't hammer the API.
+
+    Response shape (defensive parse — Anthropic has shifted field names
+    between betas):
+        {
+          "five_hour":  { "utilization": 0.42, "resets_at": "..." },
+          "seven_day":  { ... },
+          "extra_usage": {
+              "spend"|"amount"|"used":  35.97,
+              "limit"|"max"|"cap":      50.00,
+              ...
+          }
+        }
     """
-    key = os.environ.get(ADMIN_KEY_ENV)
-    if key:
-        return key.strip()
-    if ADMIN_KEY_PATH.is_file():
-        try:
-            k = ADMIN_KEY_PATH.read_text(encoding="utf-8").strip()
-            return k or None
-        except OSError as e:
-            log(f"Admin key file unreadable: {e}")
-    return None
-
-
-async def fetch_monthly_cost_usd() -> float | None:
-    """Sum cost_report buckets for the current calendar month (UTC), USD.
-
-    Cached for COST_CACHE_SECS to avoid hammering the admin API. Returns
-    None if no admin key is configured or the call fails.
-    """
-    global _cost_cache
+    global _oauth_usage_cache
     now = time.time()
-    if _cost_cache and (now - _cost_cache[0]) < COST_CACHE_SECS:
-        return _cost_cache[1]
-
-    key = read_admin_key()
-    if not key:
-        return None
-
-    # First of the current UTC month, ISO-8601 / RFC 3339.
-    t = time.gmtime(now)
-    starting_at = f"{t.tm_year:04d}-{t.tm_mon:02d}-01T00:00:00Z"
+    if _oauth_usage_cache and (now - _oauth_usage_cache[0]) < OAUTH_USAGE_CACHE_SECS:
+        return _oauth_usage_cache[1]
 
     headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
         "anthropic-version": "2023-06-01",
-        "X-Api-Key": key,
     }
-    params = {"starting_at": starting_at, "bucket_width": "1d"}
-
-    total_cents = 0.0
-    page: str | None = None
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
-            while True:
-                p = dict(params)
-                if page:
-                    p["page"] = page
-                resp = await http.get(COST_URL, headers=headers, params=p)
-                if resp.status_code >= 400:
-                    log(f"cost_report HTTP {resp.status_code}: {resp.text[:200]}")
-                    return None
-                body = resp.json()
-                for bucket in body.get("data", []):
-                    for item in bucket.get("results", []):
-                        try:
-                            total_cents += float(item.get("amount", "0"))
-                        except (TypeError, ValueError):
-                            pass
-                if not body.get("has_more"):
-                    break
-                page = body.get("next_page")
-                if not page:
-                    break
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
     except httpx.HTTPError as e:
-        log(f"cost_report call failed: {e}")
+        log(f"oauth/usage call failed: {e}")
         return None
 
-    total_usd = round(total_cents / 100.0, 2)
-    _cost_cache = (now, total_usd)
-    return total_usd
+    if resp.status_code == 401 or resp.status_code == 403:
+        log(f"oauth/usage HTTP {resp.status_code} — token likely lacks user:profile scope")
+        return None
+    if resp.status_code >= 400:
+        log(f"oauth/usage HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+
+    try:
+        body = resp.json()
+    except ValueError:
+        log("oauth/usage returned non-JSON")
+        return None
+
+    _oauth_usage_cache = (now, body)
+    return body
+
+
+def _extract_extra_usage(body: dict) -> tuple[float, float] | None:
+    """Pull (spend_usd, limit_usd) out of an oauth/usage payload.
+
+    Tries several plausible field names — the endpoint is still in beta
+    and Anthropic has shipped at least two naming variants.
+    """
+    eu = body.get("extra_usage")
+    if not isinstance(eu, dict):
+        return None
+    spend = None
+    for k in ("spend", "amount", "used", "spent", "current_usage", "cost"):
+        v = eu.get(k)
+        if isinstance(v, (int, float)):
+            spend = float(v)
+            break
+        if isinstance(v, str):
+            try:
+                spend = float(v)
+                break
+            except ValueError:
+                pass
+    limit = None
+    for k in ("limit", "max", "cap", "spend_limit", "budget"):
+        v = eu.get(k)
+        if isinstance(v, (int, float)):
+            limit = float(v)
+            break
+        if isinstance(v, str):
+            try:
+                limit = float(v)
+                break
+            except ValueError:
+                pass
+    if spend is None or limit is None:
+        # Log the raw shape once so we can adjust the field-name list.
+        log(f"extra_usage shape unrecognised: {json.dumps(eu)[:200]}")
+        return None
+    if BUDGET_OVERRIDE_USD:
+        try:
+            limit = float(BUDGET_OVERRIDE_USD)
+        except ValueError:
+            pass
+    return (spend, limit)
 
 
 async def poll_api(token: str) -> dict | None:
@@ -288,12 +307,16 @@ async def poll_api(token: str) -> dict | None:
         "ok": True,
     }
 
-    # Optional: month-to-date Admin API spend (USD). Only included when an
-    # admin key is configured. Firmware treats missing fields as "no data".
-    cost = await fetch_monthly_cost_usd()
-    if cost is not None:
-        payload["eu"] = cost
-        payload["em"] = BUDGET_USD
+    # Optional: extra-usage spend + limit via the OAuth usage endpoint
+    # (same Bearer token, no separate admin key needed). Gracefully
+    # omitted if the token lacks the user:profile scope or the field
+    # shape changes — firmware treats missing fields as "no data".
+    usage_body = await fetch_oauth_usage(token)
+    if usage_body is not None:
+        eu = _extract_extra_usage(usage_body)
+        if eu is not None:
+            payload["eu"] = round(eu[0], 2)
+            payload["em"] = round(eu[1], 2)
 
     return payload
 
