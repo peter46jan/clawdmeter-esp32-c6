@@ -578,21 +578,24 @@ void ui_update(const UsageData* data) {
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
 
-    // Extra usage (month-to-date Admin API spend). Daemon sends -1 when no
-    // admin key is configured — render dashes and an empty bar in that case.
-    if (data->extra_budget_usd > 0.0f && data->extra_usage_usd >= 0.0f) {
-        float used = data->extra_usage_usd;
-        float bud  = data->extra_budget_usd;
+    // Extra usage from /api/oauth/usage. Spend < 0 means the daemon
+    // couldn't fetch it (token scope, API change, etc.) — show dashes.
+    if (data->extra_budget_amount > 0.0f && data->extra_usage_amount >= 0.0f) {
+        float used = data->extra_usage_amount;
+        float bud  = data->extra_budget_amount;
         int pct = (int)((used / bud) * 100.0f + 0.5f);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
-        lv_label_set_text_fmt(lbl_extra_usage_val, "$%.2f / $%.2f", used, bud);
+        // Fonts are ASCII only — no €/$/£ glyphs — so we put the ISO code
+        // after the amount: "35.97 / 50.00 EUR".
+        lv_label_set_text_fmt(lbl_extra_usage_val, "%.2f / %.2f %s",
+                              used, bud, data->extra_currency);
         lv_label_set_text_fmt(lbl_extra_usage_pct, "%d%% used", pct);
         lv_bar_set_value(bar_extra_usage, pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_extra_usage, pct_color((float)pct), LV_PART_INDICATOR);
     } else {
-        lv_label_set_text(lbl_extra_usage_val, "$--- / $---");
-        lv_label_set_text(lbl_extra_usage_pct, "no admin key");
+        lv_label_set_text(lbl_extra_usage_val, "--- / ---");
+        lv_label_set_text(lbl_extra_usage_pct, "no data");
         lv_bar_set_value(bar_extra_usage, 0, LV_ANIM_OFF);
     }
 }

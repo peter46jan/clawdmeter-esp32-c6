@@ -262,8 +262,9 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
-    out->extra_usage_usd  = doc["eu"] | -1.0f;
-    out->extra_budget_usd = doc["em"] | -1.0f;
+    out->extra_usage_amount  = doc["eu"] | -1.0f;
+    out->extra_budget_amount = doc["em"] | -1.0f;
+    strlcpy(out->extra_currency, doc["cu"] | "USD", sizeof(out->extra_currency));
     out->valid = true;
     return true;
 }

@@ -227,11 +227,22 @@ async def fetch_oauth_usage(token: str) -> dict | None:
     return body
 
 
-def _extract_extra_usage(body: dict) -> tuple[float, float] | None:
-    """Pull (spend_usd, limit_usd) out of an oauth/usage payload.
+def _extract_extra_usage(body: dict) -> tuple[float, float, str] | None:
+    """Pull (spend, limit, currency_code) out of an oauth/usage payload.
 
-    Tries several plausible field names — the endpoint is still in beta
-    and Anthropic has shipped at least two naming variants.
+    Observed shape (May 2026, claude.ai EU):
+        "extra_usage": {
+            "is_enabled": true,
+            "monthly_limit": 5000,      // cents in local currency
+            "used_credits": 3597.0,     // cents
+            "utilization": 71.94,
+            "currency": "EUR",
+            "disabled_reason": null
+        }
+
+    Anthropic has shipped multiple naming variants in beta, so we look at
+    a small list of plausible field names. Amounts are always interpreted
+    as cents → divided by 100.
     """
     eu = body.get("extra_usage")
     if eu is None:
@@ -240,40 +251,37 @@ def _extract_extra_usage(body: dict) -> tuple[float, float] | None:
     if not isinstance(eu, dict):
         log(f"oauth/usage: extra_usage is {type(eu).__name__}, not object: {eu!r}")
         return None
-    spend = None
-    for k in ("spend", "amount", "used", "spent", "current_usage", "cost"):
-        v = eu.get(k)
-        if isinstance(v, (int, float)):
-            spend = float(v)
-            break
-        if isinstance(v, str):
-            try:
-                spend = float(v)
-                break
-            except ValueError:
-                pass
-    limit = None
-    for k in ("limit", "max", "cap", "spend_limit", "budget"):
-        v = eu.get(k)
-        if isinstance(v, (int, float)):
-            limit = float(v)
-            break
-        if isinstance(v, str):
-            try:
-                limit = float(v)
-                break
-            except ValueError:
-                pass
-    if spend is None or limit is None:
-        # Log the raw shape once so we can adjust the field-name list.
+
+    def _num(*keys: str) -> float | None:
+        for k in keys:
+            v = eu.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except ValueError:
+                    pass
+        return None
+
+    spend_cents = _num("used_credits", "spend", "amount", "used", "spent", "current_usage", "cost")
+    limit_cents = _num("monthly_limit", "limit", "max", "cap", "spend_limit", "budget")
+    currency = eu.get("currency") if isinstance(eu.get("currency"), str) else "USD"
+
+    if spend_cents is None or limit_cents is None:
         log(f"extra_usage shape unrecognised: {json.dumps(eu)[:200]}")
         return None
+
+    spend = round(spend_cents / 100.0, 2)
+    limit = round(limit_cents / 100.0, 2)
+
     if BUDGET_OVERRIDE_USD:
         try:
             limit = float(BUDGET_OVERRIDE_USD)
         except ValueError:
             pass
-    return (spend, limit)
+
+    return (spend, limit, currency)
 
 
 async def poll_api(token: str) -> dict | None:
@@ -327,6 +335,7 @@ async def poll_api(token: str) -> dict | None:
         if eu is not None:
             payload["eu"] = round(eu[0], 2)
             payload["em"] = round(eu[1], 2)
+            payload["cu"] = eu[2]   # currency code, e.g. "EUR" / "USD"
 
     return payload
 

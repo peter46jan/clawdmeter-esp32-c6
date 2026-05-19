@@ -10,8 +10,12 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 
-    // Month-to-date API spend via Anthropic Admin API cost_report.
-    // < 0 means "not provided" (no admin key configured).
-    float extra_usage_usd;
-    float extra_budget_usd;
+    // Extra-usage spend / monthly limit from /api/oauth/usage.
+    // Negative spend means "not provided" (token lacks scope, API down,
+    // etc.) — UI shows dashes in that case. Currency is the 3-letter
+    // code (e.g. "EUR", "USD") returned by Anthropic. Display as a
+    // suffix because the bundled fonts only cover ASCII glyphs.
+    float extra_usage_amount;
+    float extra_budget_amount;
+    char  extra_currency[8];
 };
