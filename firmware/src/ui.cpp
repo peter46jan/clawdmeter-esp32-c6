@@ -586,11 +586,21 @@ void ui_update(const UsageData* data) {
         int pct = (int)((used / bud) * 100.0f + 0.5f);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
+        // Build the label into a stack buffer first. Passing
+        // data->extra_currency directly to lv_label_set_text_fmt's "%s"
+        // crashes LVGL on the C6 build (lv_vsnprintf → lv_strnlen reads
+        // past the end of memory). Format ourselves with the safer libc
+        // snprintf, then hand a known-terminated buffer to LVGL.
         // Fonts are ASCII only — no €/$/£ glyphs — so we put the ISO code
         // after the amount: "35.97 / 50.00 EUR".
-        lv_label_set_text_fmt(lbl_extra_usage_val, "%.2f / %.2f %s",
-                              used, bud, data->extra_currency);
-        lv_label_set_text_fmt(lbl_extra_usage_pct, "%d%% used", pct);
+        char cur[8];
+        strlcpy(cur, data->extra_currency, sizeof(cur));
+        char line[40];
+        snprintf(line, sizeof(line), "%.2f / %.2f %s", used, bud, cur);
+        lv_label_set_text(lbl_extra_usage_val, line);
+        char pctbuf[16];
+        snprintf(pctbuf, sizeof(pctbuf), "%d%% used", pct);
+        lv_label_set_text(lbl_extra_usage_pct, pctbuf);
         lv_bar_set_value(bar_extra_usage, pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_extra_usage, pct_color((float)pct), LV_PART_INDICATOR);
     } else {
