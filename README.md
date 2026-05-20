@@ -18,9 +18,38 @@ Rather than send it back, I sat down with **Claude Code** and ported the whole f
 
 ## What I added on top
 
-Beyond the port itself, two features that make the device genuinely useful:
+### 1. Multi-provider Usage screen (Claude + OpenAI + DeepSeek)
 
-### 1. Second page: Extra usage / monthly spend
+The daemon can now poll **Claude**, **OpenAI / Codex** and **DeepSeek** in parallel. When more than one is enabled, the Usage screen rotates through them every ~10 seconds — a small provider tag (`CLAUDE` / `OPENAI` / `DEEPSEEK`) appears under the title so you know what you're looking at.
+
+Each provider returns the same normalised shape (session %, secondary %, reset time, status, cost), but the underlying data path differs:
+
+| Provider | Endpoint | What 's' / 'w' mean |
+|---|---|---|
+| Claude   | `POST /v1/messages` (rate-limit headers) + `GET /api/oauth/usage` | 5-hour session % + 7-day weekly % |
+| OpenAI   | `GET /v1/usage?date=YYYY-MM-DD` (fallback to `/v1/models` headers) | Today's tokens vs 10M daily org limit |
+| DeepSeek | `GET /user/balance` | Spent credits vs original credit |
+
+Per-provider failures use exponential back-off (`[10, 30, 60, 120, 300]s`) so one broken API doesn't slow the others down. Disabled providers are simply skipped.
+
+Configure via `~/.clawdmeter.json` (copy from `daemon/config.example.json`):
+
+```json
+{
+  "claude":   { "enabled": true },
+  "openai":   { "enabled": true,  "api_key": "sk-..." },
+  "deepseek": { "enabled": true,  "api_key": "..." },
+  "poll_interval": 60
+}
+```
+
+API keys can also come from `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` env vars on the LaunchAgent plist. Claude still uses its OAuth token from the macOS Keychain — no API key needed.
+
+The Details, Pomodoro and Splash screens stay Claude-only (Anthropic's `extra_usage` data is what powers them and there's no equivalent on the other providers).
+
+Pattern ported from [AiMetr](https://github.com/...) — same provider abstraction, scoped to the three we use.
+
+### 2. Second page: Extra usage / monthly spend
 
 On the Usage screen, **swipe right-to-left** → you land on a new Details page that shows your month-to-date API spend (exactly what `console.anthropic.com → Settings → Billing` calls "Extra usage"). Includes your budget and a progress bar.
 
@@ -28,7 +57,7 @@ Data comes from Anthropic's OAuth usage endpoint (`/api/oauth/usage`) — same B
 
 Swipe back left-to-right to return to the Usage screen.
 
-### 2. Pomodoro focus timer
+### 3. Pomodoro focus timer
 
 Use the right side button to start a focus session:
 
@@ -41,7 +70,7 @@ Use the right side button to start a focus session:
 
 Fullscreen arc countdown with `MM:SS` in the centre. When the timer expires: the panel flashes to maximum brightness, "Done!" appears, and the device **automatically types `/clear` + Enter into Claude Code** so you land in a fresh conversation. PWR button during the timer = cancel.
 
-### 3. Clawd reacts to your monthly spend
+### 4. Clawd reacts to your monthly spend
 
 The splash Clawd watches your Extra-usage % and shifts mood as you burn through the budget:
 
@@ -54,11 +83,11 @@ The splash Clawd watches your Extra-usage % and shifts mood as you burn through 
 
 Threshold transitions switch immediately rather than waiting for the next 20-second rotation, so the moment you cross 80% Clawd notices.
 
-### 4. Throttled-Clawd when rate-limited
+### 5. Throttled-Clawd when rate-limited
 
 If the daemon ever reports `st="limited"` (Anthropic returned a rate-limit hit), the splash drops to the **`expression sleep`** animation — Clawd is knocked out until the status returns to `allowed`. A subtle "you've been throttled" cue rather than a popup.
 
-### 5. PWR button does more than cycling screens
+### 6. PWR button does more than cycling screens
 
 The middle (PWR) button has three different actions depending on how you press it:
 
@@ -100,11 +129,12 @@ The daemon on your Mac reads your Claude Code OAuth token (from `~/.claude/.cred
    ```
    Once a minute you should see a line like:
    ```
-   Sending: {"s":12,"sr":155,"w":35,"wr":3015,"st":"allowed","ok":true,"eu":12.34,"em":50.0,"cu":"EUR"}
+   Sending: {"v":2,"p":[{"id":"claude","ok":true,"s":12,"sr":155,"w":35,"wr":3015,"st":"allowed","eu":12.34,"em":50.0,"cu":"EUR"}]}
    ```
-   - `s` / `sr` = session % + reset (minutes) — Usage screen, top bar
-   - `w` / `wr` = weekly % + reset — Usage screen, bottom bar
-   - `eu` / `em` / `cu` = extra usage, budget, currency — Details screen
+   With more providers enabled the `p` array grows — one entry per
+   provider. Per entry: `s`/`sr` = primary % + reset (minutes),
+   `w`/`wr` = secondary if applicable, `st` = status,
+   `cost` = USD spent (OpenAI/DeepSeek), `eu`/`em`/`cu` = Claude only.
 
 **Switching accounts?** Sign out and back in via Claude Code (`claude logout` / `claude login`). The daemon picks up the new token on the next poll.
 

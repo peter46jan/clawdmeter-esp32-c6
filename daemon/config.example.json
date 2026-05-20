@@ -1,0 +1,14 @@
+{
+  "claude": {
+    "enabled": true
+  },
+  "openai": {
+    "enabled": false,
+    "api_key": "sk-..."
+  },
+  "deepseek": {
+    "enabled": false,
+    "api_key": "..."
+  },
+  "poll_interval": 60
+}

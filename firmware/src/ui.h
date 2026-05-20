@@ -14,6 +14,9 @@ enum screen_t {
 void ui_init(void);
 void ui_update(const UsageData* data);
 void ui_tick_anim(void);
+// Step through enabled providers on the Usage screen, picking the next
+// ok-provider every ~10s. Call once per loop iteration from main.cpp.
+void ui_tick_provider_rotate(void);
 
 // Touch-driven swipe detection. Call once per loop with the current
 // touch state. Tracks press start, computes deltas, and fires a screen

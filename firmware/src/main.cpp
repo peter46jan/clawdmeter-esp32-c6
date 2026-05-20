@@ -263,7 +263,27 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData
+// Read a single provider object (from a v2 "p" array entry) into a slot.
+template <typename Obj>
+static void parse_provider_obj(Obj obj, ProviderData* p) {
+    strlcpy(p->id, obj["id"] | "unknown", sizeof(p->id));
+    p->session_pct        = obj["s"]  | 0.0f;
+    p->session_reset_mins = obj["sr"] | -1;
+    p->weekly_pct         = obj["w"]  | 0.0f;
+    p->weekly_reset_mins  = obj["wr"] | -1;
+    strlcpy(p->status, obj["st"] | "unknown", sizeof(p->status));
+    p->cost_usd = obj["cost"] | -1.0f;
+    p->ok       = obj["ok"]   | true;
+}
+
+// Dual-format JSON parser:
+//   v2:  {"v":2,"p":[ {provider…}, … ]}  — multi-provider
+//   v1:  {"s":…,"sr":…,…}                 — single-provider legacy
+//
+// Either way `out` ends up populated with both the providers[] array
+// AND the legacy flat session/weekly/extra fields (mirroring whichever
+// provider is "primary" — Claude when present, else providers[0]) so
+// the Details / splash / status code paths don't need to change.
 static bool parse_json(const char* json, UsageData* out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
@@ -272,15 +292,77 @@ static bool parse_json(const char* json, UsageData* out) {
         return false;
     }
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->ok = doc["ok"] | false;
+    // Default the multi-provider array.
+    out->provider_count = 0;
+    for (int i = 0; i < CLAWD_MAX_PROVIDERS; i++) {
+        out->providers[i].id[0] = '\0';
+        out->providers[i].ok = false;
+        out->providers[i].cost_usd = -1.0f;
+    }
+
+    // Default the legacy flat fields.
     out->extra_usage_amount  = doc["eu"] | -1.0f;
     out->extra_budget_amount = doc["em"] | -1.0f;
     strlcpy(out->extra_currency, doc["cu"] | "USD", sizeof(out->extra_currency));
+
+    JsonArrayConst arr = doc["p"].as<JsonArrayConst>();
+    if (!arr.isNull()) {
+        // v2 multi-provider payload.
+        for (JsonObjectConst obj : arr) {
+            if (out->provider_count >= CLAWD_MAX_PROVIDERS) break;
+            parse_provider_obj(obj, &out->providers[out->provider_count]);
+            out->provider_count++;
+        }
+        // Pick "primary" for the legacy flat fields — Claude if present,
+        // else first provider. Extra-usage fields are Claude-specific.
+        const ProviderData* primary = nullptr;
+        for (uint8_t i = 0; i < out->provider_count; i++) {
+            if (strcmp(out->providers[i].id, "claude") == 0) {
+                primary = &out->providers[i];
+                // Claude entry may carry eu/em/cu inline.
+                for (JsonObjectConst obj : arr) {
+                    if (strcmp(obj["id"] | "", "claude") == 0) {
+                        out->extra_usage_amount  = obj["eu"] | -1.0f;
+                        out->extra_budget_amount = obj["em"] | -1.0f;
+                        strlcpy(out->extra_currency, obj["cu"] | "USD",
+                                sizeof(out->extra_currency));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        if (!primary && out->provider_count > 0) primary = &out->providers[0];
+        if (primary) {
+            out->session_pct        = primary->session_pct;
+            out->session_reset_mins = primary->session_reset_mins;
+            out->weekly_pct         = primary->weekly_pct;
+            out->weekly_reset_mins  = primary->weekly_reset_mins;
+            strlcpy(out->status, primary->status, sizeof(out->status));
+            out->ok = primary->ok;
+        }
+    } else {
+        // v1 single-provider legacy payload — treat as one synthetic
+        // Claude-id'd provider entry.
+        out->session_pct        = doc["s"]  | 0.0f;
+        out->session_reset_mins = doc["sr"] | -1;
+        out->weekly_pct         = doc["w"]  | 0.0f;
+        out->weekly_reset_mins  = doc["wr"] | -1;
+        strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
+        out->ok = doc["ok"] | false;
+
+        ProviderData* p = &out->providers[0];
+        strlcpy(p->id, "claude", sizeof(p->id));
+        p->session_pct        = out->session_pct;
+        p->session_reset_mins = out->session_reset_mins;
+        p->weekly_pct         = out->weekly_pct;
+        p->weekly_reset_mins  = out->weekly_reset_mins;
+        strlcpy(p->status, out->status, sizeof(p->status));
+        p->cost_usd = -1.0f;
+        p->ok       = out->ok;
+        out->provider_count = 1;
+    }
+
     out->valid = true;
     return true;
 }
@@ -488,6 +570,7 @@ void loop() {
     }
     lv_timer_handler();
     ui_tick_anim();
+    ui_tick_provider_rotate();
     ui_pomodoro_tick();
     ble_tick();
     power_tick();

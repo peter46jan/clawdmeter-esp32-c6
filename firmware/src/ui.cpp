@@ -46,6 +46,13 @@ static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
+static lv_obj_t* lbl_provider_id;  // top-centre tag: CLAUDE / OPENAI / DEEPSEEK
+
+// Multi-provider rotation state.
+static UsageData last_usage = {};      // snapshot of the last ui_update
+static uint8_t   active_provider_idx = 0;
+static uint32_t  last_rotate_ms = 0;
+#define PROVIDER_ROTATE_INTERVAL_MS 10000
 
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
@@ -299,6 +306,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+
+    // Small provider tag in the title spot, only visible when more than
+    // one provider is enabled (otherwise it's clutter).
+    lbl_provider_id = lv_label_create(usage_container);
+    lv_label_set_text(lbl_provider_id, "");
+    lv_obj_set_style_text_font(lbl_provider_id, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_provider_id, COL_DIM, 0);
+    lv_obj_align(lbl_provider_id, LV_ALIGN_TOP_MID, 16, TITLE_Y + 64);
 
     make_usage_panel(usage_container, CONTENT_Y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -636,27 +651,59 @@ void ui_init(void) {
     lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
 }
 
+// Render one provider's session+weekly into the Usage screen widgets.
+// Used both by ui_update (initial fill) and ui_tick_provider_rotate.
+static void render_usage_for(const ProviderData* p) {
+    int s_pct = (int)(p->session_pct + 0.5f);
+    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
+    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_session, pct_color(p->session_pct), LV_PART_INDICATOR);
+
+    char buf[48];
+    format_reset_time(p->session_reset_mins, buf, sizeof(buf));
+    lv_label_set_text(lbl_session_reset, buf);
+
+    int w_pct = (int)(p->weekly_pct + 0.5f);
+    if (w_pct > 0 || p->weekly_reset_mins > 0) {
+        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
+        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_weekly, pct_color(p->weekly_pct), LV_PART_INDICATOR);
+        format_reset_time(p->weekly_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_weekly_reset, buf);
+    } else {
+        // Provider has no secondary window — show dashes and an empty bar.
+        lv_label_set_text(lbl_weekly_pct,   "---%");
+        lv_bar_set_value(bar_weekly, 0, LV_ANIM_OFF);
+        lv_label_set_text(lbl_weekly_reset, "");
+    }
+
+    // Show provider id (uppercase) only when more than one is active.
+    if (last_usage.provider_count > 1) {
+        char tag[16];
+        size_t i;
+        for (i = 0; i < sizeof(tag) - 1 && p->id[i] != '\0'; i++) {
+            char c = p->id[i];
+            tag[i] = (c >= 'a' && c <= 'z') ? (c - 'a' + 'A') : c;
+        }
+        tag[i] = '\0';
+        lv_label_set_text(lbl_provider_id, tag);
+    } else {
+        lv_label_set_text(lbl_provider_id, "");
+    }
+}
+
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
-    int s_pct = (int)(data->session_pct + 0.5f);
+    last_usage = *data;       // snapshot for the rotation tick
+    last_rotate_ms = lv_tick_get();
+    active_provider_idx = 0;
 
-    // Usage screen
-    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
-
-    char buf[48];
-    format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_session_reset, buf);
-
-    int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-
-    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_weekly_reset, buf);
+    // Render the primary (Claude when present) by default — same look as
+    // before for single-provider setups.
+    if (data->provider_count > 0) {
+        render_usage_for(&data->providers[0]);
+    }
 
     // Extra usage from /api/oauth/usage. Spend < 0 means the daemon
     // couldn't fetch it (token scope, API change, etc.) — show dashes.
@@ -702,6 +749,25 @@ void ui_update(const UsageData* data) {
         lv_label_set_text(lbl_extra_pct, "");
         lv_bar_set_value(bar_extra_usage, 0, LV_ANIM_OFF);
     }
+}
+
+void ui_tick_provider_rotate(void) {
+    if (current_screen != SCREEN_USAGE) return;
+    if (last_usage.provider_count <= 1) return;
+    uint32_t now = lv_tick_get();
+    if (now - last_rotate_ms < PROVIDER_ROTATE_INTERVAL_MS) return;
+
+    // Pick the next provider in array order that reported ok.
+    for (uint8_t step = 1; step <= last_usage.provider_count; step++) {
+        uint8_t next = (active_provider_idx + step) % last_usage.provider_count;
+        if (last_usage.providers[next].ok) {
+            active_provider_idx = next;
+            last_rotate_ms = now;
+            render_usage_for(&last_usage.providers[next]);
+            return;
+        }
+    }
+    last_rotate_ms = now;   // nothing to rotate to — try again next interval
 }
 
 void ui_tick_anim(void) {
