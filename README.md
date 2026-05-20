@@ -16,6 +16,8 @@ Rather than send it back, I sat down with **Claude Code** and ported the whole f
 - IMU axis transform because the QMI8658 is physically mounted at a different orientation on this board.
 - Touch coordinates rotate with the screen so swipes keep working in any orientation.
 
+Once the C6 port was working I kept adding to it. Saw [AiMetr](https://github.com/...)'s multi-provider Electron dashboard and borrowed the same idea on the daemon side — so the kastje now isn't just a Claude meter anymore, it can rotate through **Claude, OpenAI / Codex and DeepSeek** on the same Usage screen, picking up rate-limit and spend data from each one's own API. Everything below documents the result.
+
 ## What I added on top
 
 ### 1. Multi-provider Usage screen (Claude + OpenAI + DeepSeek)
