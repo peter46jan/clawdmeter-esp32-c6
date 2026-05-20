@@ -24,5 +24,11 @@ void splash_pick_for_current_rate(void);
 // True when splash is currently rendering (used to gate re-picks).
 bool splash_is_active(void);
 
+// Tell the splash module the current Extra-usage spend percentage so it
+// can pick mood-matching animations once spend climbs past 50% (focus),
+// 80% (worried), or 95% (panic). Pass -1 when no spend data is available
+// to fall back to the rate-driven selection.
+void splash_set_spend_pct(int pct);
+
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);

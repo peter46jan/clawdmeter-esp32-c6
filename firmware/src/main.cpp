@@ -570,6 +570,14 @@ void loop() {
                     g_before, g_after, usage.session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
+            // Feed the spend percentage to the splash module so Clawd
+            // shifts to a mood-matching animation group above 50/80/95%.
+            int spend_pct = -1;
+            if (usage.extra_budget_amount > 0.0f && usage.extra_usage_amount >= 0.0f) {
+                spend_pct = (int)((usage.extra_usage_amount /
+                                   usage.extra_budget_amount) * 100.0f + 0.5f);
+            }
+            splash_set_spend_pct(spend_pct);
             ui_update(&usage);
             ble_send_ack();
         } else {

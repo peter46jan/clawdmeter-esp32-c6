@@ -39,18 +39,54 @@ static bool     active = false;
 
 #define SPLASH_ROTATE_INTERVAL_MS 20000
 
-#define GROUP_COUNT 4
+// Four rate-driven groups (existing) + three spend-emotion groups (new).
+// Spend groups are picked instead of rate groups once the daemon reports
+// Extra-usage >= 50% — see splash_set_spend_pct().
+//
+//   0 idle      — rate-driven default
+//   1 normal    — rate-driven
+//   2 active    — rate-driven
+//   3 heavy     — rate-driven
+//   4 focus     — spend 50-79% (work animations)
+//   5 worried   — spend 80-94% (surprise / wink expressions)
+//   6 panic     — spend 95%+   (frantic dance)
+#define GROUP_COUNT 7
 #define GROUP_MAX   4
 static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
+static int spend_pct = -1;     // -1 = no spend data yet
+static int last_spend_group = -1;
+
 static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
+    // Rate-driven (existing)
     { "expression sleep", "idle breathe", "idle blink", "expression wink" },
     { "idle look around", "work think", "work coding", NULL },
     { "dance sway", "expression surprise", "dance bounce", NULL },
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
+    // Spend-driven (new) — reuses existing animations from the catalog
+    // so no new sprite work is needed.
+    //   focus   → heads-down working
+    //   worried → "uh oh" expressions
+    //   panic   → frantic chaos
+    { "work coding", "work think", "idle look around", NULL },
+    { "expression surprise", "expression wink", "idle blink", NULL },
+    { "dance djmix", "dance bounce dj", "dance bounce", "dance sway dj" },
 };
+
+#define SPEND_GROUP_FOCUS    4
+#define SPEND_GROUP_WORRIED  5
+#define SPEND_GROUP_PANIC    6
+
+// Map a spend percentage to one of the spend-emotion groups, or -1 if
+// the rate-driven selection should be used instead.
+static int spend_group_for(int pct) {
+    if (pct < 50)  return -1;
+    if (pct < 80)  return SPEND_GROUP_FOCUS;
+    if (pct < 95)  return SPEND_GROUP_WORRIED;
+    return SPEND_GROUP_PANIC;
+}
 
 static void resolve_group_lists(void) {
     for (int g = 0; g < GROUP_COUNT; g++) {
@@ -173,8 +209,21 @@ void splash_next(void) {
 
 void splash_pick_for_current_rate(void) {
     if (SPLASH_ANIM_COUNT == 0) return;
-    int g = usage_rate_group();
-    if (g < 0 || g >= GROUP_COUNT) g = 0;
+
+    // Spend takes priority over the rate-based selection: if the daemon
+    // has reported >= 50% of the monthly budget used, force one of the
+    // mood-matching groups (focus / worried / panic). Below 50% we use
+    // the existing rate-driven logic so the Clawd still gets sleepy
+    // when you haven't touched Claude in a while.
+    int spend_g = spend_group_for(spend_pct);
+    int g;
+    if (spend_g >= 0) {
+        g = spend_g;
+    } else {
+        g = usage_rate_group();
+        if (g < 0 || g >= GROUP_COUNT) g = 0;
+    }
+    last_spend_group = spend_g;
     if (group_size[g] == 0) return;
 
     uint8_t slot = group_rotation[g] % group_size[g];
@@ -205,4 +254,22 @@ void splash_hide(void) {
 
 lv_obj_t* splash_get_root(void) {
     return splash_container;
+}
+
+void splash_set_spend_pct(int pct) {
+    if (pct < 0) pct = -1;
+    if (pct > 200) pct = 200;     // clamp; budget overruns can exceed 100
+    if (pct == spend_pct) return;
+
+    int prev = spend_pct;
+    spend_pct = pct;
+
+    // If we just crossed an emotion threshold (e.g. 79→80 = worried, or
+    // 94→95 = panic) re-pick immediately so the Clawd reacts to the
+    // change instead of waiting up to 20s for the next rotation.
+    int prev_g = spend_group_for(prev);
+    int now_g  = spend_group_for(pct);
+    if (prev_g != now_g && active) {
+        splash_pick_for_current_rate();
+    }
 }
