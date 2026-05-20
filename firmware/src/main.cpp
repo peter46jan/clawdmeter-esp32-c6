@@ -9,6 +9,7 @@
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "theme.h"
 
 // On boards with PSRAM (S3) put big draw buffers in SPIRAM. On C6 there is
 // no PSRAM, so route them to internal SRAM and rely on the splash refactor
@@ -45,6 +46,21 @@ XPowersPMU pmu;
 SensorQMI8658 imu;
 
 static UsageData usage = {};
+
+// Display blackout — toggled by PWR double-tap. While true the panel
+// brightness is 0; the device still polls touch + BLE so it can wake on
+// either signal. Saves battery + cuts visible-light pollution on the desk.
+bool clawd_blackout = false;
+static uint8_t clawd_brightness_saved = 200;
+void clawd_set_blackout(bool on) {
+    if (on == clawd_blackout) return;
+    clawd_blackout = on;
+    if (on) {
+        gfx->setBrightness(0);
+    } else {
+        gfx->setBrightness(clawd_brightness_saved);
+    }
+}
 
 // ---- Touch interrupt + shared state ----
 static volatile bool     touch_pressed = false;
@@ -332,6 +348,10 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
+    // Theme palette from NVS — must run before any UI is built so the
+    // colours captured in styles are correct for this boot.
+    theme_init();
+
     // Init I2C (shared by touch + PMU)
     Wire.begin(IIC_SDA, IIC_SCL);
 
@@ -434,6 +454,10 @@ static void handle_rotation_change(void) {
     if (now - ramp_last < 25) return;
     ramp_last = now;
 
+    // If the user blackout'd the screen mid-rotation, skip the brightness
+    // ramp so we don't fight against their explicit "stay dark" choice.
+    if (clawd_blackout) { ramp_step = 0; return; }
+
     static const uint8_t levels[] = {60, 120, 170, 200};
     gfx->setBrightness(levels[ramp_step - 1]);
     if (ramp_step >= 4) ramp_step = 0;
@@ -525,14 +549,37 @@ void loop() {
             }
         }
 
+        // PWR button — short press has multi-purpose behaviour
+        //   1× short:      cycle screens (or splash_next / pomodoro cancel)
+        //   2× short:      toggle display blackout
+        // Long press (AXP ~1.5s IRQ) toggles light/dark theme + reboots.
+        static int      pwr_tap_count   = 0;
+        static uint32_t pwr_last_tap_ms = 0;
+        const uint32_t  PWR_MULTI_TAP_WINDOW_MS = 500;
+
         if (power_pwr_pressed()) {
-            if (ui_pomodoro_active()) {
-                ui_pomodoro_cancel();
-            } else if (ui_get_current_screen() == SCREEN_SPLASH) {
-                splash_next();
-            } else {
-                ui_cycle_screen();
+            pwr_tap_count++;
+            pwr_last_tap_ms = millis();
+        }
+
+        if (pwr_tap_count > 0 &&
+            (millis() - pwr_last_tap_ms) >= PWR_MULTI_TAP_WINDOW_MS) {
+            int n = pwr_tap_count;
+            pwr_tap_count = 0;
+            if (n == 1) {
+                if (ui_pomodoro_active())                       ui_pomodoro_cancel();
+                else if (ui_get_current_screen()==SCREEN_SPLASH) splash_next();
+                else                                            ui_cycle_screen();
+            } else if (n >= 2) {
+                extern bool clawd_blackout;       // defined below in this file
+                extern void clawd_set_blackout(bool);
+                clawd_set_blackout(!clawd_blackout);
             }
+        }
+
+        if (power_pwr_long_pressed()) {
+            Serial.println("PWR long-press: theme toggle");
+            theme_toggle_and_reboot();
         }
     }
 
@@ -559,6 +606,11 @@ void loop() {
     // Check for serial commands (screenshot, etc.)
     check_serial_cmd();
 
+    // Wake from blackout on either a screen tap or new BLE data.
+    if (clawd_blackout && (touch_pressed || ble_has_data())) {
+        clawd_set_blackout(false);
+    }
+
     // Process incoming BLE data
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
@@ -578,6 +630,10 @@ void loop() {
                                    usage.extra_budget_amount) * 100.0f + 0.5f);
             }
             splash_set_spend_pct(spend_pct);
+            // Toggle the "throttled" Clawd animation when the daemon
+            // reports st="limited". Comparison is case-insensitive
+            // because the API has used both capitalisations.
+            splash_set_limited(strcasecmp(usage.status, "limited") == 0);
             ui_update(&usage);
             ble_send_ack();
         } else {

@@ -30,5 +30,9 @@ bool splash_is_active(void);
 // to fall back to the rate-driven selection.
 void splash_set_spend_pct(int pct);
 
+// Force a "you've been throttled" animation. Called when the daemon
+// reports st="limited". Override stays in effect until cleared.
+void splash_set_limited(bool limited);
+
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);

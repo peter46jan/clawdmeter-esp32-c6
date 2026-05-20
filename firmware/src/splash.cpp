@@ -56,8 +56,9 @@ static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
-static int spend_pct = -1;     // -1 = no spend data yet
-static int last_spend_group = -1;
+static int  spend_pct = -1;      // -1 = no spend data yet
+static int  last_spend_group = -1;
+static bool limited_active = false;  // st="limited" override
 
 static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     // Rate-driven (existing)
@@ -210,6 +211,23 @@ void splash_next(void) {
 void splash_pick_for_current_rate(void) {
     if (SPLASH_ANIM_COUNT == 0) return;
 
+    // Throttle / rate-limit override beats everything else. The "expression
+    // sleep" animation reads as Clawd-being-knocked-out which fits the
+    // 'you've been throttled' vibe; if it's not in the catalog we fall
+    // through to the normal selection.
+    if (limited_active) {
+        for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+            if (strcmp(splash_anims[i].name, "expression sleep") == 0) {
+                cur_anim = (uint16_t)i;
+                cur_frame = 0;
+                frame_started_ms = millis();
+                last_pick_ms = frame_started_ms;
+                render_frame(splash_anims[i].frames[0], splash_anims[i].palette);
+                return;
+            }
+        }
+    }
+
     // Spend takes priority over the rate-based selection: if the daemon
     // has reported >= 50% of the monthly budget used, force one of the
     // mood-matching groups (focus / worried / panic). Below 50% we use
@@ -254,6 +272,12 @@ void splash_hide(void) {
 
 lv_obj_t* splash_get_root(void) {
     return splash_container;
+}
+
+void splash_set_limited(bool limited) {
+    if (limited == limited_active) return;
+    limited_active = limited;
+    if (active) splash_pick_for_current_rate();
 }
 
 void splash_set_spend_pct(int pct) {
