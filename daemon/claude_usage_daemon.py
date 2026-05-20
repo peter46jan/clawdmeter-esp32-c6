@@ -181,7 +181,7 @@ async def fetch_oauth_usage(token: str) -> dict | None:
           "five_hour":  { "utilization": 0.42, "resets_at": "..." },
           "seven_day":  { ... },
           "extra_usage": {
-              "spend"|"amount"|"used":  35.97,
+              "spend"|"amount"|"used":  12.34,
               "limit"|"max"|"cap":      50.00,
               ...
           }
@@ -234,7 +234,7 @@ def _extract_extra_usage(body: dict) -> tuple[float, float, str] | None:
         "extra_usage": {
             "is_enabled": true,
             "monthly_limit": 5000,      // cents in local currency
-            "used_credits": 3597.0,     // cents
+            "used_credits": 1234.0,     // cents
             "utilization": 71.94,
             "currency": "EUR",
             "disabled_reason": null

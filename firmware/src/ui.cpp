@@ -76,7 +76,7 @@ static screen_t     pomo_return_to   = SCREEN_USAGE;
 // Pared-down layout: title + big amount + budget subtitle + bar + percent.
 // Uptime / last-update / reset countdowns were removed at user request.
 static lv_obj_t* details_container;
-static lv_obj_t* lbl_extra_amount;   // big: "35.97"
+static lv_obj_t* lbl_extra_amount;   // big: "12.34"
 static lv_obj_t* lbl_extra_currency; // small ISO suffix next to amount: "EUR"
 static lv_obj_t* lbl_extra_budget;   // small: "of 50.00"
 static lv_obj_t* lbl_extra_pct;      // big: "72%"
@@ -321,7 +321,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 //
 // Layout:
 //   title "Extra usage" (Tiempos 56, top centred)
-//   amount       (Tiempos 56)  — big number, e.g. "35.97"
+//   amount       (Tiempos 56)  — big number, e.g. "12.34"
 //   currency     (Styrene 28)  — ISO code suffix, e.g. "EUR"
 //   "of 50.00"   (Styrene 28)  — dim budget reference
 //   bar          full-width, taller than the usage screen bars
