@@ -41,7 +41,35 @@ Use the right side button to start a focus session:
 
 Fullscreen arc countdown with `MM:SS` in the centre. When the timer expires: the panel flashes to maximum brightness, "Done!" appears, and the device **automatically types `/clear` + Enter into Claude Code** so you land in a fresh conversation. PWR button during the timer = cancel.
 
-Both features only work when the daemon is running and you're signed in to Claude — see below.
+### 3. Clawd reacts to your monthly spend
+
+The splash Clawd watches your Extra-usage % and shifts mood as you burn through the budget:
+
+| Spend  | Clawd does |
+|---|---|
+| < 50%  | Normal rate-driven animations (idle / working / dancing depending on activity) |
+| 50–79% | **Focus mode** — `work coding`, `work think`, `idle look around` |
+| 80–94% | **Worried** — `expression surprise`, `expression wink`, `idle blink` |
+| 95%+   | **Panic** — frantic dance (`djmix`, `bounce dj`, …) |
+
+Threshold transitions switch immediately rather than waiting for the next 20-second rotation, so the moment you cross 80% Clawd notices.
+
+### 4. Throttled-Clawd when rate-limited
+
+If the daemon ever reports `st="limited"` (Anthropic returned a rate-limit hit), the splash drops to the **`expression sleep`** animation — Clawd is knocked out until the status returns to `allowed`. A subtle "you've been throttled" cue rather than a popup.
+
+### 5. PWR button does more than cycling screens
+
+The middle (PWR) button has three different actions depending on how you press it:
+
+| Press pattern             | What happens |
+|---|---|
+| **Single short press**    | Cycle screens (Usage ↔ Details ↔ Bluetooth). On splash, advance to the next animation. On Pomodoro, cancel the timer. |
+| **Double-tap (2× quick)** | **Blackout** the panel — backlight goes to 0. Wakes on any screen tap *or* on the next BLE data poll. Use it as "do not disturb" for the desk. |
+| **Long press (~1.5 s)**   | **Theme switcher** — flips between dark and light Anthropic palette. The device reboots once (~2 s) so every widget picks up the new colours cleanly. Setting is persisted in NVS. |
+| Hold ~6 seconds           | AXP2101 hardware power-off (unchanged, this is the PMU's own behaviour). |
+
+All three features only work when the daemon is running and you're signed in to Claude — see below.
 
 ## How to connect your Claude account
 
