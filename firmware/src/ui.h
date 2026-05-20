@@ -21,14 +21,14 @@ void ui_tick_anim(void);
 // splash toggle doesn't fight the swipe.
 void ui_touch_tick(bool pressed, int x, int y);
 
-// Pomodoro timer (25-minute focus session). Triggered by a long-press
-// on the right side button. Shows a fullscreen arc countdown; when it
-// finishes the screen flashes, types "/clear\n" over BLE HID, and
-// returns to the previous screen.
-void ui_pomodoro_start(void);     // begin a 25-minute session
+// Pomodoro timer (focus session of arbitrary length). Triggered by
+// multi-tap on the right side button (2× = 25min, 3× = 60min, 4× = 90min).
+// Shows a fullscreen arc countdown; when it finishes the screen flashes,
+// types "/clear\n" over BLE HID, and returns to the previous screen.
+void ui_pomodoro_start(uint32_t duration_ms);
 void ui_pomodoro_cancel(void);    // abort early (PWR button)
 void ui_pomodoro_tick(void);      // call once per loop
-bool ui_pomodoro_active(void);    // for main.cpp to know whether to suppress other button actions
+bool ui_pomodoro_active(void);
 void ui_show_screen(screen_t screen);
 void ui_cycle_screen(void);
 void ui_toggle_splash(void);

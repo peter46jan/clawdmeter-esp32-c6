@@ -472,48 +472,58 @@ void loop() {
 
     // Three-button input (global, screen-independent):
     //   LEFT  (BOOT)    → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (KEY2)    → short: Shift+Tab; long-hold: start 25-min Pomodoro
+    //   RIGHT (KEY2)    → multi-tap detection:
+    //                       1× = Shift+Tab (Claude Code mode toggle)
+    //                       2× = start 25-min Pomodoro
+    //                       3× = start 60-min Pomodoro
+    //                       4× = start 90-min Pomodoro
+    //                     Decision fires MULTI_TAP_WINDOW_MS after the
+    //                     last release — short-tap behaviour therefore
+    //                     has a ~500ms latency, but that's imperceptible
+    //                     in practice.
     //   PWR   (AXP)     → cycle screens; on splash, cycle animations;
     //                     on pomodoro, cancel timer
     {
         static bool     back_was = false, fwd_was = false;
-        static uint32_t fwd_press_ms = 0;
-        static bool     fwd_long_handled = false;
-        const uint32_t  POMODORO_LONG_PRESS_MS = 1000;
+        static int      fwd_tap_count = 0;
+        static uint32_t fwd_last_release_ms = 0;
+        const uint32_t  MULTI_TAP_WINDOW_MS = 500;
 
         bool back_now = (BTN_BACK >= 0) && (digitalRead(BTN_BACK) == LOW);
         bool fwd_now  = (BTN_FWD  >= 0) && (digitalRead(BTN_FWD)  == LOW);
 
-        // LEFT (Space / push-to-talk): unchanged — fires on press and
-        // releases on release for proper key-down behaviour.
+        // LEFT (Space / push-to-talk): unchanged.
         if (back_now != back_was) {
             if (back_now) ble_keyboard_press(0x2C, 0);
             else          ble_keyboard_release();
             back_was = back_now;
         }
 
-        // RIGHT: differentiate short press vs long hold. Short = send
-        // Shift+Tab on release. Long (>= 1000ms held) = start Pomodoro
-        // immediately and suppress the Shift+Tab.
-        if (fwd_now && !fwd_was) {
-            // Press start
-            fwd_press_ms     = millis();
-            fwd_long_handled = false;
-        } else if (fwd_now && fwd_was && !fwd_long_handled) {
-            // Held — check long-press threshold
-            if (millis() - fwd_press_ms >= POMODORO_LONG_PRESS_MS) {
-                fwd_long_handled = true;
-                ui_pomodoro_start();
-            }
-        } else if (!fwd_now && fwd_was) {
-            // Released — send Shift+Tab only if it was a short press.
-            if (!fwd_long_handled) {
-                ble_keyboard_press(0x2B, 0x02);
-                delay(20);
-                ble_keyboard_release();
-            }
+        // RIGHT: count taps inside a sliding window. Each release bumps
+        // the counter and resets the window; the action fires once the
+        // window expires with no further taps.
+        if (!fwd_now && fwd_was) {
+            fwd_tap_count++;
+            fwd_last_release_ms = millis();
         }
         fwd_was = fwd_now;
+
+        if (fwd_tap_count > 0 && !fwd_now &&
+            (millis() - fwd_last_release_ms) >= MULTI_TAP_WINDOW_MS) {
+            int n = fwd_tap_count;
+            fwd_tap_count = 0;
+            switch (n) {
+            case 1:
+                ble_keyboard_press(0x2B, 0x02);  // Shift+Tab
+                delay(20);
+                ble_keyboard_release();
+                break;
+            case 2: ui_pomodoro_start(25UL * 60UL * 1000UL); break;
+            case 3: ui_pomodoro_start(60UL * 60UL * 1000UL); break;
+            case 4: ui_pomodoro_start(90UL * 60UL * 1000UL); break;
+            default: break;  // 5+ taps: silently ignore (probably noise)
+            }
+        }
 
         if (power_pwr_pressed()) {
             if (ui_pomodoro_active()) {

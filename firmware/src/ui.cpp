@@ -60,16 +60,16 @@ static lv_obj_t* pomo_time_label;
 static lv_obj_t* pomo_label;        // "Focus" / "Done!"
 
 // Pomodoro state machine. start_ms is millis() at session start; the
-// session ends at start_ms + POMO_DURATION_MS. DONE_HOLD_MS keeps the
+// session ends at start_ms + pomo_duration_ms. DONE_HOLD_MS keeps the
 // "Done!" message on-screen briefly after typing "/clear\n" so the user
 // gets a visual confirmation.
 enum pomo_state_t { POMO_IDLE, POMO_RUNNING, POMO_DONE };
 static pomo_state_t pomo_state = POMO_IDLE;
-static uint32_t     pomo_start_ms = 0;
-static uint32_t     pomo_done_ms  = 0;
-static screen_t     pomo_return_to = SCREEN_USAGE;
+static uint32_t     pomo_start_ms    = 0;
+static uint32_t     pomo_duration_ms = 25UL * 60UL * 1000UL;
+static uint32_t     pomo_done_ms     = 0;
+static screen_t     pomo_return_to   = SCREEN_USAGE;
 
-#define POMO_DURATION_MS  (25UL * 60UL * 1000UL)
 #define POMO_DONE_HOLD_MS  4000UL
 
 // ---- Details screen widgets ----
@@ -429,14 +429,25 @@ static void init_pomodoro_screen(lv_obj_t* scr) {
     lv_obj_add_flag(pomo_container, LV_OBJ_FLAG_HIDDEN);
 }
 
-void ui_pomodoro_start(void) {
+void ui_pomodoro_start(uint32_t duration_ms) {
     if (pomo_state == POMO_RUNNING) return;  // already going
-    pomo_state    = POMO_RUNNING;
-    pomo_start_ms = lv_tick_get();
-    pomo_return_to = (current_screen == SCREEN_SPLASH) ? SCREEN_USAGE : current_screen;
+    pomo_state       = POMO_RUNNING;
+    pomo_start_ms    = lv_tick_get();
+    pomo_duration_ms = duration_ms;
+    pomo_return_to   = (current_screen == SCREEN_SPLASH) ? SCREEN_USAGE : current_screen;
     lv_label_set_text(pomo_label, "Focus");
     lv_obj_set_style_text_color(pomo_label, COL_DIM, 0);
     lv_arc_set_value(pomo_arc, 0);
+
+    // Seed the time label with the initial MM:SS so the screen doesn't
+    // show stale text in the first frame before the tick runs.
+    uint32_t total_s = (duration_ms + 999) / 1000;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02lu:%02lu",
+             (unsigned long)(total_s / 60),
+             (unsigned long)(total_s % 60));
+    lv_label_set_text(pomo_time_label, buf);
+
     ui_show_screen(SCREEN_POMODORO);
 }
 
@@ -457,7 +468,7 @@ void ui_pomodoro_tick(void) {
 
     if (pomo_state == POMO_RUNNING) {
         uint32_t elapsed = now - pomo_start_ms;
-        if (elapsed >= POMO_DURATION_MS) {
+        if (elapsed >= pomo_duration_ms) {
             // Session complete. Flash the panel and type "/clear\n" so
             // the user lands in a fresh Claude conversation.
             pomo_state = POMO_DONE;
@@ -471,7 +482,7 @@ void ui_pomodoro_tick(void) {
             return;
         }
         // Remaining time + arc progress.
-        uint32_t remaining_s = (POMO_DURATION_MS - elapsed + 999) / 1000;
+        uint32_t remaining_s = (pomo_duration_ms - elapsed + 999) / 1000;
         uint32_t mm = remaining_s / 60;
         uint32_t ss = remaining_s % 60;
         char buf[8];
@@ -479,7 +490,7 @@ void ui_pomodoro_tick(void) {
                  (unsigned long)mm, (unsigned long)ss);
         lv_label_set_text(pomo_time_label, buf);
         // Arc fills as time progresses — visually obvious how far in we are.
-        uint32_t progress = (uint32_t)((uint64_t)elapsed * 1000 / POMO_DURATION_MS);
+        uint32_t progress = (uint32_t)((uint64_t)elapsed * 1000 / pomo_duration_ms);
         lv_arc_set_value(pomo_arc, (int32_t)progress);
         return;
     }
