@@ -307,13 +307,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Small provider tag in the title spot, only visible when more than
-    // one provider is enabled (otherwise it's clutter).
+    // Provider tag was originally a separate label below the title — it
+    // bumped into the first panel. The provider name now goes into the
+    // title itself via render_usage_for (e.g. "Claude" / "OpenAI"),
+    // re-using the same Tiempos 56 slot. lbl_provider_id is kept as a
+    // hidden no-op placeholder so existing references don't NPE.
     lbl_provider_id = lv_label_create(usage_container);
-    lv_label_set_text(lbl_provider_id, "");
-    lv_obj_set_style_text_font(lbl_provider_id, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(lbl_provider_id, COL_DIM, 0);
-    lv_obj_align(lbl_provider_id, LV_ALIGN_TOP_MID, 16, TITLE_Y + 64);
+    lv_obj_add_flag(lbl_provider_id, LV_OBJ_FLAG_HIDDEN);
 
     make_usage_panel(usage_container, CONTENT_Y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -677,19 +677,19 @@ static void render_usage_for(const ProviderData* p) {
         lv_label_set_text(lbl_weekly_reset, "");
     }
 
-    // Show provider id (uppercase) only when more than one is active.
+    // Re-skin the screen title with the provider name when rotating
+    // between multiple providers; keep the generic "Usage" otherwise.
     if (last_usage.provider_count > 1) {
-        char tag[16];
-        size_t i;
-        for (i = 0; i < sizeof(tag) - 1 && p->id[i] != '\0'; i++) {
-            char c = p->id[i];
-            tag[i] = (c >= 'a' && c <= 'z') ? (c - 'a' + 'A') : c;
-        }
-        tag[i] = '\0';
-        lv_label_set_text(lbl_provider_id, tag);
+        char title[16];
+        if      (strcmp(p->id, "claude")   == 0) strlcpy(title, "Claude",   sizeof(title));
+        else if (strcmp(p->id, "openai")   == 0) strlcpy(title, "OpenAI",   sizeof(title));
+        else if (strcmp(p->id, "deepseek") == 0) strlcpy(title, "DeepSeek", sizeof(title));
+        else                                      strlcpy(title, p->id,     sizeof(title));
+        lv_label_set_text(lbl_title, title);
     } else {
-        lv_label_set_text(lbl_provider_id, "");
+        lv_label_set_text(lbl_title, "Usage");
     }
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 }
 
 void ui_update(const UsageData* data) {
